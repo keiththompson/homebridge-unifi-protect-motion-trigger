@@ -1,47 +1,24 @@
-import type {
-  API,
-  DynamicPlatformPlugin,
-  Logging,
-  PlatformAccessory,
-  PlatformConfig,
-} from 'homebridge';
-import { ProtectApi } from 'unifi-protect';
+import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from 'homebridge';
 
-import { PLATFORM_NAME, PLUGIN_NAME, DEFAULT_MOTION_DURATION } from './settings.js';
-import type { ProtectMotionPlatformConfig, ControllerConfig } from './settings.js';
+import { ProtectClient } from './api/client.js';
+import { ProtectApiError } from './api/errors.js';
+import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
-
-interface ProtectCamera {
-  id: string;
-  name: string;
-  type: string;
-  mac: string;
-  host: string;
-  lastMotion: number | null;
-  ledSettings?: {
-    isEnabled: boolean;
-    blinkRate: number;
-  };
-}
-
-interface ProtectBootstrap {
-  cameras: ProtectCamera[];
-  lastUpdateId: string;
-}
+import type { ControllerConfig, ProtectMotionPlatformConfig } from './settings.js';
+import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 
 export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   public readonly accessories: PlatformAccessory[] = [];
   private readonly configuredAccessories: Map<string, CameraAccessory> = new Map();
-
-  private protectApis: Map<string, ProtectApi> = new Map();
+  private readonly clients: Map<string, ProtectClient> = new Map();
   private readonly motionDuration: number;
   private readonly debug: boolean;
 
-  public get Service() {
+  public get Service(): typeof this.api.hap.Service {
     return this.api.hap.Service;
   }
 
-  public get Characteristic() {
+  public get Characteristic(): typeof this.api.hap.Characteristic {
     return this.api.hap.Characteristic;
   }
 
@@ -63,13 +40,13 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
     this.api.on('shutdown', () => {
       this.log.info('Shutting down, closing API connections...');
-      for (const protectApi of this.protectApis.values()) {
-        protectApi.reset();
+      for (const client of this.clients.values()) {
+        client.disconnect();
       }
     });
   }
 
-  configureAccessory(accessory: PlatformAccessory): void {
+  public configureAccessory(accessory: PlatformAccessory): void {
     this.debugLog(`Loading accessory from cache: ${accessory.displayName}`);
     this.accessories.push(accessory);
   }
@@ -81,8 +58,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
 
     for (const controller of controllers) {
-      if (!controller.address || !controller.username || !controller.password) {
-        this.log.warn('Skipping controller with missing credentials');
+      if (!this.validateControllerConfig(controller)) {
         continue;
       }
 
@@ -90,60 +66,65 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private async connectToController(controller: ControllerConfig): Promise<void> {
-    this.log.info(`Connecting to UniFi Protect controller at ${controller.address}...`);
+  private validateControllerConfig(controller: ControllerConfig): boolean {
+    if (!controller.address) {
+      this.log.error('Controller configuration missing address');
+      return false;
+    }
+    if (!controller.username) {
+      this.log.error('Controller configuration missing username');
+      return false;
+    }
+    if (!controller.password) {
+      this.log.error('Controller configuration missing password');
+      return false;
+    }
+    return true;
+  }
 
-    const protectApi = new ProtectApi();
+  private async connectToController(controller: ControllerConfig): Promise<void> {
+    const client = new ProtectClient(this.log);
 
     try {
-      const loggedIn = await protectApi.login(
-        controller.address,
-        controller.username,
-        controller.password,
-      );
+      const success = await client.connect(controller.address, controller.username, controller.password);
 
-      if (!loggedIn) {
-        this.log.error(`Failed to login to controller at ${controller.address}`);
+      if (!success) {
         return;
       }
 
-      this.log.info(`Successfully logged in to ${controller.address}`);
-      this.protectApis.set(controller.address, protectApi);
+      this.clients.set(controller.address, client);
 
-      const bootstrapSuccess = await protectApi.getBootstrap();
-      if (!bootstrapSuccess) {
-        this.log.error(`Failed to get bootstrap from ${controller.address}`);
-        return;
-      }
-
-      const bootstrap = protectApi.bootstrap as unknown as ProtectBootstrap;
-      if (!bootstrap?.cameras) {
+      const cameras = client.cameras;
+      if (cameras.length === 0) {
         this.log.warn(`No cameras found on controller ${controller.address}`);
         return;
       }
 
-      this.log.info(`Found ${bootstrap.cameras.length} cameras on ${controller.address}`);
-      this.configureCameras(protectApi, bootstrap.cameras, controller.address);
+      this.log.info(`Found ${cameras.length} cameras on ${controller.address}`);
+      this.configureCameras(client, cameras, controller.address);
 
       // Subscribe to real-time events
-      protectApi.on('message', (packet: unknown) => {
+      client.onMessage((packet: ProtectEventPacket) => {
         this.handleProtectMessage(controller.address, packet);
       });
-
     } catch (error) {
-      this.log.error(`Error connecting to ${controller.address}:`, error);
+      if (error instanceof ProtectApiError) {
+        if (error.isAuthError) {
+          this.log.error(`Authentication failed for ${controller.address}. Check your credentials.`);
+        } else {
+          this.log.error(`API error for ${controller.address}: ${error.message}`);
+        }
+      } else {
+        this.log.error(`Error connecting to ${controller.address}:`, error);
+      }
     }
   }
 
-  private configureCameras(
-    protectApi: ProtectApi,
-    cameras: ProtectCamera[],
-    controllerAddress: string,
-  ): void {
+  private configureCameras(client: ProtectClient, cameras: ProtectCamera[], controllerAddress: string): void {
     for (const camera of cameras) {
       const uuid = this.api.hap.uuid.generate(`${controllerAddress}:${camera.id}`);
 
-      let accessory = this.accessories.find(acc => acc.UUID === uuid);
+      let accessory = this.accessories.find((acc) => acc.UUID === uuid);
       const isNew = !accessory;
 
       if (!accessory) {
@@ -159,12 +140,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       accessory.context.controllerAddress = controllerAddress;
       accessory.context.motionEnabled = accessory.context.motionEnabled ?? true;
 
-      const cameraAccessory = new CameraAccessory(
-        this,
-        accessory,
-        protectApi,
-        this.motionDuration,
-      );
+      const cameraAccessory = new CameraAccessory(this, accessory, client, this.motionDuration);
 
       this.configuredAccessories.set(camera.id, cameraAccessory);
 
@@ -173,15 +149,16 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       }
     }
 
-    // Remove accessories that no longer exist
+    this.removeStaleAccessories(cameras, controllerAddress);
+  }
+
+  private removeStaleAccessories(cameras: ProtectCamera[], controllerAddress: string): void {
     const validUUIDs = new Set(
-      cameras.map(camera => this.api.hap.uuid.generate(`${controllerAddress}:${camera.id}`))
+      cameras.map((camera) => this.api.hap.uuid.generate(`${controllerAddress}:${camera.id}`)),
     );
 
     const accessoriesToRemove = this.accessories.filter(
-      acc =>
-        acc.context.controllerAddress === controllerAddress &&
-        !validUUIDs.has(acc.UUID)
+      (acc) => acc.context.controllerAddress === controllerAddress && !validUUIDs.has(acc.UUID),
     );
 
     if (accessoriesToRemove.length > 0) {
@@ -196,17 +173,12 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private handleProtectMessage(controllerAddress: string, packet: unknown): void {
-    const payload = packet as {
-      action?: { action: string; modelKey: string; id: string };
-      payload?: ProtectCamera;
-    };
-
-    if (!payload.action || !payload.payload) {
+  private handleProtectMessage(_controllerAddress: string, packet: ProtectEventPacket): void {
+    if (!packet.action || !packet.payload) {
       return;
     }
 
-    const { action, modelKey, id } = payload.action;
+    const { action, modelKey, id } = packet.action;
 
     if (modelKey !== 'camera' || action !== 'update') {
       return;
@@ -217,7 +189,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    const cameraPayload = payload.payload;
+    const cameraPayload = packet.payload;
 
     // Check for motion update
     if (cameraPayload.lastMotion !== undefined) {

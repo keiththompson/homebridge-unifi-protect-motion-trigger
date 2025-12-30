@@ -1,17 +1,8 @@
-import type { PlatformAccessory, Service, CharacteristicValue } from 'homebridge';
-import type { ProtectApi } from 'unifi-protect';
-import type { ProtectMotionPlatform } from './platform.js';
+import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
 
-interface ProtectCamera {
-  id: string;
-  name: string;
-  type: string;
-  mac: string;
-  ledSettings?: {
-    isEnabled: boolean;
-    blinkRate: number;
-  };
-}
+import type { ProtectClient } from './api/client.js';
+import type { LedSettings, ProtectCamera } from './api/types.js';
+import type { ProtectMotionPlatform } from './platform.js';
 
 export class CameraAccessory {
   private readonly motionSensor: Service;
@@ -26,64 +17,16 @@ export class CameraAccessory {
   constructor(
     private readonly platform: ProtectMotionPlatform,
     private readonly accessory: PlatformAccessory,
-    private readonly protectApi: ProtectApi,
+    private readonly client: ProtectClient,
     private readonly motionDuration: number,
   ) {
     const camera = this.camera;
     this.ledEnabled = camera.ledSettings?.isEnabled ?? true;
 
-    // Set accessory information
-    const infoService = this.accessory.getService(this.platform.Service.AccessoryInformation);
-    if (infoService) {
-      infoService
-        .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Ubiquiti')
-        .setCharacteristic(this.platform.Characteristic.Model, camera.type || 'UniFi Camera')
-        .setCharacteristic(this.platform.Characteristic.SerialNumber, camera.mac || camera.id);
-    }
-
-    // Motion Sensor service
-    this.motionSensor = this.getOrAddService(
-      this.platform.Service.MotionSensor,
-      'Motion',
-      'motion-sensor',
-    );
-
-    this.motionSensor.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
-    this.motionSensor.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion');
-
-    this.motionSensor.getCharacteristic(this.platform.Characteristic.MotionDetected)
-      .onGet(() => this.motionDetected);
-
-    this.motionSensor.getCharacteristic(this.platform.Characteristic.StatusActive)
-      .onGet(() => this.isMotionEnabled);
-
-    // Motion Enable/Disable Switch service
-    this.motionSwitch = this.getOrAddService(
-      this.platform.Service.Switch,
-      'Motion Enabled',
-      'motion-switch',
-    );
-
-    this.motionSwitch.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
-    this.motionSwitch.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion Enabled');
-
-    this.motionSwitch.getCharacteristic(this.platform.Characteristic.On)
-      .onGet(() => this.isMotionEnabled)
-      .onSet(this.setMotionEnabled.bind(this));
-
-    // LED Switch service
-    this.ledSwitch = this.getOrAddService(
-      this.platform.Service.Switch,
-      'Status LED',
-      'led-switch',
-    );
-
-    this.ledSwitch.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
-    this.ledSwitch.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Status LED');
-
-    this.ledSwitch.getCharacteristic(this.platform.Characteristic.On)
-      .onGet(() => this.ledEnabled)
-      .onSet(this.setLedEnabled.bind(this));
+    this.configureAccessoryInformation(camera);
+    this.motionSensor = this.configureMotionSensor();
+    this.motionSwitch = this.configureMotionSwitch();
+    this.ledSwitch = this.configureLedSwitch();
 
     // Set initial values
     this.updateMotionSensorState(false);
@@ -100,6 +43,57 @@ export class CameraAccessory {
 
   private set isMotionEnabled(value: boolean) {
     this.accessory.context.motionEnabled = value;
+  }
+
+  private configureAccessoryInformation(camera: ProtectCamera): void {
+    const infoService = this.accessory.getService(this.platform.Service.AccessoryInformation);
+    if (infoService) {
+      infoService
+        .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Ubiquiti')
+        .setCharacteristic(this.platform.Characteristic.Model, camera.type || 'UniFi Camera')
+        .setCharacteristic(this.platform.Characteristic.SerialNumber, camera.mac || camera.id);
+    }
+  }
+
+  private configureMotionSensor(): Service {
+    const service = this.getOrAddService(this.platform.Service.MotionSensor, 'Motion', 'motion-sensor');
+
+    service.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    service.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion');
+
+    service.getCharacteristic(this.platform.Characteristic.MotionDetected).onGet(() => this.motionDetected);
+
+    service.getCharacteristic(this.platform.Characteristic.StatusActive).onGet(() => this.isMotionEnabled);
+
+    return service;
+  }
+
+  private configureMotionSwitch(): Service {
+    const service = this.getOrAddService(this.platform.Service.Switch, 'Motion Enabled', 'motion-switch');
+
+    service.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    service.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion Enabled');
+
+    service
+      .getCharacteristic(this.platform.Characteristic.On)
+      .onGet(() => this.isMotionEnabled)
+      .onSet(this.setMotionEnabled.bind(this));
+
+    return service;
+  }
+
+  private configureLedSwitch(): Service {
+    const service = this.getOrAddService(this.platform.Service.Switch, 'Status LED', 'led-switch');
+
+    service.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    service.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Status LED');
+
+    service
+      .getCharacteristic(this.platform.Characteristic.On)
+      .onGet(() => this.ledEnabled)
+      .onSet(this.setLedEnabled.bind(this));
+
+    return service;
   }
 
   private getOrAddService(
@@ -121,10 +115,7 @@ export class CameraAccessory {
     this.platform.debugLog(`Motion ${enabled ? 'enabled' : 'disabled'} for ${this.camera.name}`);
 
     // Update StatusActive on motion sensor
-    this.motionSensor.updateCharacteristic(
-      this.platform.Characteristic.StatusActive,
-      enabled,
-    );
+    this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, enabled);
 
     // If motion is disabled and currently detecting, clear it
     if (!enabled && this.motionDetected) {
@@ -136,33 +127,14 @@ export class CameraAccessory {
     const enabled = value as boolean;
     this.platform.debugLog(`Setting LED ${enabled ? 'on' : 'off'} for ${this.camera.name}`);
 
-    try {
-      const camera = this.camera;
-      const result = await this.protectApi.updateDevice(camera as never, {
-        ledSettings: { isEnabled: enabled },
-      } as never);
+    const success = await this.client.updateCameraLed(this.camera, enabled);
 
-      if (result) {
-        this.ledEnabled = enabled;
-        this.platform.log.info(`LED ${enabled ? 'enabled' : 'disabled'} for ${camera.name}`);
-      } else {
-        this.platform.log.error(`Failed to update LED settings for ${camera.name}`);
-        // Revert the switch state
-        setTimeout(() => {
-          this.ledSwitch.updateCharacteristic(
-            this.platform.Characteristic.On,
-            this.ledEnabled,
-          );
-        }, 100);
-      }
-    } catch (error) {
-      this.platform.log.error(`Error updating LED for ${this.camera.name}:`, error);
-      // Revert the switch state
+    if (success) {
+      this.ledEnabled = enabled;
+    } else {
+      // Revert the switch state on failure
       setTimeout(() => {
-        this.ledSwitch.updateCharacteristic(
-          this.platform.Characteristic.On,
-          this.ledEnabled,
-        );
+        this.ledSwitch.updateCharacteristic(this.platform.Characteristic.On, this.ledEnabled);
       }, 100);
     }
   }
@@ -181,9 +153,7 @@ export class CameraAccessory {
 
     // Only trigger if motion is enabled
     if (!this.isMotionEnabled) {
-      this.platform.debugLog(
-        `Motion detected but disabled for ${this.camera.name}, ignoring`,
-      );
+      this.platform.debugLog(`Motion detected but disabled for ${this.camera.name}, ignoring`);
       return;
     }
 
@@ -217,21 +187,15 @@ export class CameraAccessory {
 
   private updateMotionSensorState(detected: boolean): void {
     this.motionDetected = detected;
-    this.motionSensor.updateCharacteristic(
-      this.platform.Characteristic.MotionDetected,
-      detected,
-    );
+    this.motionSensor.updateCharacteristic(this.platform.Characteristic.MotionDetected, detected);
   }
 
-  public handleLedSettingsUpdate(ledSettings: { isEnabled: boolean; blinkRate: number }): void {
+  public handleLedSettingsUpdate(ledSettings: LedSettings): void {
     this.ledEnabled = ledSettings.isEnabled;
     this.updateLedSwitchState(ledSettings.isEnabled);
   }
 
   private updateLedSwitchState(enabled: boolean): void {
-    this.ledSwitch.updateCharacteristic(
-      this.platform.Characteristic.On,
-      enabled,
-    );
+    this.ledSwitch.updateCharacteristic(this.platform.Characteristic.On, enabled);
   }
 }

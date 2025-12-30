@@ -3,7 +3,7 @@
   "pluginType": "platform",
   "singular": false,
   "headerDisplay": "UniFi Protect Motion Trigger exposes motion sensors and camera settings without video streaming. Perfect for use alongside Scrypted or other video streaming solutions.",
-  "footerDisplay": "For help, see the [README](https://github.com/your-username/homebridge-unifi-protect-motion-trigger#readme).",
+  "footerDisplay": "For help, see the [README](https://github.com/keiththompson/homebridge-unifi-protect-motion-trigger#readme).",
   "schema": {
     "type": "object",
     "properties": {
@@ -23,7 +23,8 @@
               "title": "Controller Address",
               "type": "string",
               "required": true,
-              "description": "IP address or hostname of your UniFi Protect controller"
+              "description": "IP address or hostname of your UniFi Protect controller",
+              "placeholder": "192.168.1.1"
             },
             "username": {
               "title": "Username",
@@ -35,7 +36,10 @@
               "title": "Password",
               "type": "string",
               "required": true,
-              "description": "Local user account password"
+              "description": "Local user account password",
+              "x-schema-form": {
+                "type": "password"
+              }
             }
           }
         }
@@ -45,17 +49,37 @@
         "type": "integer",
         "default": 10,
         "minimum": 1,
-        "maximum": 60,
+        "maximum": 300,
         "description": "Duration in seconds before motion sensor resets after detecting motion"
       },
       "debug": {
         "title": "Debug Mode",
         "type": "boolean",
         "default": false,
-        "description": "Enable debug logging"
+        "description": "Enable debug logging for troubleshooting"
       }
     }
   },
-  "form": null,
-  "display": null
+  "layout": [
+    {
+      "type": "fieldset",
+      "title": "Controllers",
+      "expandable": true,
+      "expanded": true,
+      "items": [
+        {
+          "key": "controllers",
+          "type": "array",
+          "items": ["controllers[].address", "controllers[].username", "controllers[].password"]
+        }
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Advanced Settings",
+      "expandable": true,
+      "expanded": false,
+      "items": ["motionDuration", "debug"]
+    }
+  ]
 }

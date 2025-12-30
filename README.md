@@ -49,15 +49,15 @@ Add the platform to your Homebridge `config.json`:
 
 ### Configuration Options
 
-| Option | Required | Default | Description |
-|--------|----------|---------|-------------|
-| `platform` | Yes | - | Must be `"UniFi Protect Motion Trigger"` |
-| `controllers` | Yes | - | Array of UniFi Protect controllers |
-| `controllers[].address` | Yes | - | IP address or hostname of your UniFi Protect controller |
-| `controllers[].username` | Yes | - | Local user account username |
-| `controllers[].password` | Yes | - | Local user account password |
-| `motionDuration` | No | `10` | Seconds before motion sensor resets after detecting motion |
-| `debug` | No | `false` | Enable debug logging |
+| Option                   | Required | Default | Description                                                |
+| ------------------------ | -------- | ------- | ---------------------------------------------------------- |
+| `platform`               | Yes      | -       | Must be `"UniFi Protect Motion Trigger"`                   |
+| `controllers`            | Yes      | -       | Array of UniFi Protect controllers                         |
+| `controllers[].address`  | Yes      | -       | IP address or hostname of your UniFi Protect controller    |
+| `controllers[].username` | Yes      | -       | Local user account username                                |
+| `controllers[].password` | Yes      | -       | Local user account password                                |
+| `motionDuration`         | No       | `10`    | Seconds before motion sensor resets after detecting motion |
+| `debug`                  | No       | `false` | Enable debug logging                                       |
 
 ## UniFi Protect User Setup
 
@@ -88,16 +88,19 @@ For security, create a dedicated local user for Homebridge:
 ## Troubleshooting
 
 ### No cameras discovered
+
 - Verify your controller address is correct
 - Ensure the user has access to view cameras
 - Check Homebridge logs for connection errors
 
 ### Motion events not triggering
+
 - Ensure the Motion Enabled switch is ON
 - Check that motion detection is enabled in UniFi Protect
 - Verify WebSocket connection in debug logs
 
 ### LED control not working
+
 - The user account needs Full Management permissions
 - Some camera models may not support LED control
 
