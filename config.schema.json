@@ -1,0 +1,61 @@
+{
+  "pluginAlias": "UniFi Protect Motion Trigger",
+  "pluginType": "platform",
+  "singular": false,
+  "headerDisplay": "UniFi Protect Motion Trigger exposes motion sensors and camera settings without video streaming. Perfect for use alongside Scrypted or other video streaming solutions.",
+  "footerDisplay": "For help, see the [README](https://github.com/your-username/homebridge-unifi-protect-motion-trigger#readme).",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "UniFi Protect Motion Trigger",
+        "required": true
+      },
+      "controllers": {
+        "title": "Controllers",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "title": "Controller Address",
+              "type": "string",
+              "required": true,
+              "description": "IP address or hostname of your UniFi Protect controller"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string",
+              "required": true,
+              "description": "Local user account username"
+            },
+            "password": {
+              "title": "Password",
+              "type": "string",
+              "required": true,
+              "description": "Local user account password"
+            }
+          }
+        }
+      },
+      "motionDuration": {
+        "title": "Motion Duration",
+        "type": "integer",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 60,
+        "description": "Duration in seconds before motion sensor resets after detecting motion"
+      },
+      "debug": {
+        "title": "Debug Mode",
+        "type": "boolean",
+        "default": false,
+        "description": "Enable debug logging"
+      }
+    }
+  },
+  "form": null,
+  "display": null
+}
