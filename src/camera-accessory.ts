@@ -44,9 +44,12 @@ export class CameraAccessory {
     // Motion Sensor service
     this.motionSensor = this.getOrAddService(
       this.platform.Service.MotionSensor,
-      `${camera.name} Motion`,
+      'Motion',
       'motion-sensor',
     );
+
+    this.motionSensor.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    this.motionSensor.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion');
 
     this.motionSensor.getCharacteristic(this.platform.Characteristic.MotionDetected)
       .onGet(() => this.motionDetected);
@@ -57,13 +60,12 @@ export class CameraAccessory {
     // Motion Enable/Disable Switch service
     this.motionSwitch = this.getOrAddService(
       this.platform.Service.Switch,
-      `${camera.name} Motion Enabled`,
+      'Motion Enabled',
       'motion-switch',
     );
 
-    this.motionSwitch
-      .setCharacteristic(this.platform.Characteristic.Name, `${camera.name} Motion Enabled`)
-      .setCharacteristic(this.platform.Characteristic.ConfiguredName, `${camera.name} Motion Enabled`);
+    this.motionSwitch.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    this.motionSwitch.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Motion Enabled');
 
     this.motionSwitch.getCharacteristic(this.platform.Characteristic.On)
       .onGet(() => this.isMotionEnabled)
@@ -72,13 +74,12 @@ export class CameraAccessory {
     // LED Switch service
     this.ledSwitch = this.getOrAddService(
       this.platform.Service.Switch,
-      `${camera.name} Status LED`,
+      'Status LED',
       'led-switch',
     );
 
-    this.ledSwitch
-      .setCharacteristic(this.platform.Characteristic.Name, `${camera.name} Status LED`)
-      .setCharacteristic(this.platform.Characteristic.ConfiguredName, `${camera.name} Status LED`);
+    this.ledSwitch.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    this.ledSwitch.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Status LED');
 
     this.ledSwitch.getCharacteristic(this.platform.Characteristic.On)
       .onGet(() => this.ledEnabled)
