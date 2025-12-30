@@ -61,6 +61,10 @@ export class CameraAccessory {
       'motion-switch',
     );
 
+    this.motionSwitch
+      .setCharacteristic(this.platform.Characteristic.Name, `${camera.name} Motion Enabled`)
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, `${camera.name} Motion Enabled`);
+
     this.motionSwitch.getCharacteristic(this.platform.Characteristic.On)
       .onGet(() => this.isMotionEnabled)
       .onSet(this.setMotionEnabled.bind(this));
@@ -71,6 +75,10 @@ export class CameraAccessory {
       `${camera.name} Status LED`,
       'led-switch',
     );
+
+    this.ledSwitch
+      .setCharacteristic(this.platform.Characteristic.Name, `${camera.name} Status LED`)
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, `${camera.name} Status LED`);
 
     this.ledSwitch.getCharacteristic(this.platform.Characteristic.On)
       .onGet(() => this.ledEnabled)
