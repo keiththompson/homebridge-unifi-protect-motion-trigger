@@ -2,13 +2,7 @@ import type { Logging } from 'homebridge';
 import { ProtectApi } from 'unifi-protect';
 
 import { ProtectApiError } from './errors.js';
-import type {
-  LedSettings,
-  ProtectBootstrap,
-  ProtectCamera,
-  ProtectEventPacket,
-  RecordingSettings,
-} from './types.js';
+import type { LedSettings, ProtectBootstrap, ProtectCamera, ProtectEventPacket, RecordingSettings } from './types.js';
 
 export type MessageHandler = (packet: ProtectEventPacket) => void;
 
