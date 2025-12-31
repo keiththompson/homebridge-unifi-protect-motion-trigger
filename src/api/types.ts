@@ -9,6 +9,9 @@ export interface ProtectCamera {
     isEnabled: boolean;
     blinkRate: number;
   };
+  recordingSettings?: {
+    enableMotionDetection: boolean;
+  };
 }
 
 export interface ProtectBootstrap {
@@ -28,4 +31,8 @@ export interface ProtectEventPacket {
 export interface LedSettings {
   isEnabled: boolean;
   blinkRate?: number;
+}
+
+export interface RecordingSettings {
+  enableMotionDetection: boolean;
 }

@@ -2,7 +2,13 @@ import type { Logging } from 'homebridge';
 import { ProtectApi } from 'unifi-protect';
 
 import { ProtectApiError } from './errors.js';
-import type { LedSettings, ProtectBootstrap, ProtectCamera, ProtectEventPacket } from './types.js';
+import type {
+  LedSettings,
+  ProtectBootstrap,
+  ProtectCamera,
+  ProtectEventPacket,
+  RecordingSettings,
+} from './types.js';
 
 export type MessageHandler = (packet: ProtectEventPacket) => void;
 
@@ -91,6 +97,32 @@ export class ProtectClient {
       return false;
     } catch (error) {
       this.log.error(`Error updating LED for ${camera.name}:`, error);
+      return false;
+    }
+  }
+
+  public async updateCameraMotionDetection(camera: ProtectCamera, enabled: boolean): Promise<boolean> {
+    if (!this.connected) {
+      this.log.error('Cannot update motion detection: not connected');
+      return false;
+    }
+
+    try {
+      const payload: { recordingSettings: RecordingSettings } = {
+        recordingSettings: { enableMotionDetection: enabled },
+      };
+
+      const result = await this.api.updateDevice(camera as never, payload as never);
+
+      if (result) {
+        this.log.info(`Motion detection ${enabled ? 'enabled' : 'disabled'} for ${camera.name}`);
+        return true;
+      }
+
+      this.log.error(`Failed to update motion detection settings for ${camera.name}`);
+      return false;
+    } catch (error) {
+      this.log.error(`Error updating motion detection for ${camera.name}:`, error);
       return false;
     }
   }
