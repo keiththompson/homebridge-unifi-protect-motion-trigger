@@ -138,7 +138,6 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
       accessory.context.camera = camera;
       accessory.context.controllerAddress = controllerAddress;
-      accessory.context.motionEnabled = accessory.context.motionEnabled ?? true;
 
       const cameraAccessory = new CameraAccessory(this, accessory, client, this.motionDuration);
 
@@ -201,6 +200,12 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     if (cameraPayload.ledSettings !== undefined) {
       this.debugLog(`LED settings updated on camera ${id}`);
       cameraAccessory.handleLedSettingsUpdate(cameraPayload.ledSettings);
+    }
+
+    // Check for recording settings update (motion detection toggle)
+    if (cameraPayload.recordingSettings?.enableMotionDetection !== undefined) {
+      this.debugLog(`Recording settings updated on camera ${id}`);
+      cameraAccessory.handleRecordingSettingsUpdate(cameraPayload.recordingSettings.enableMotionDetection);
     }
   }
 

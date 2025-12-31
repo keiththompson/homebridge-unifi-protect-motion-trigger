@@ -23,6 +23,10 @@ export class CameraAccessory {
     const camera = this.camera;
     this.ledEnabled = camera.ledSettings?.isEnabled ?? true;
 
+    // Initialize motion enabled state from camera's actual settings
+    const motionEnabled = camera.recordingSettings?.enableMotionDetection ?? true;
+    this.isMotionEnabled = motionEnabled;
+
     this.configureAccessoryInformation(camera);
     this.motionSensor = this.configureMotionSensor();
     this.motionSwitch = this.configureMotionSwitch();
@@ -30,6 +34,7 @@ export class CameraAccessory {
 
     // Set initial values
     this.updateMotionSensorState(false);
+    this.updateMotionSwitchState(motionEnabled);
     this.updateLedSwitchState(this.ledEnabled);
   }
 
@@ -109,17 +114,27 @@ export class CameraAccessory {
     return this.accessory.addService(serviceType, displayName, subtype);
   }
 
-  private setMotionEnabled(value: CharacteristicValue): void {
+  private async setMotionEnabled(value: CharacteristicValue): Promise<void> {
     const enabled = value as boolean;
-    this.isMotionEnabled = enabled;
-    this.platform.debugLog(`Motion ${enabled ? 'enabled' : 'disabled'} for ${this.camera.name}`);
+    this.platform.debugLog(`Setting motion detection ${enabled ? 'on' : 'off'} for ${this.camera.name}`);
 
-    // Update StatusActive on motion sensor
-    this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, enabled);
+    const success = await this.client.updateCameraMotionDetection(this.camera, enabled);
 
-    // If motion is disabled and currently detecting, clear it
-    if (!enabled && this.motionDetected) {
-      this.clearMotion();
+    if (success) {
+      this.isMotionEnabled = enabled;
+
+      // Update StatusActive on motion sensor
+      this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, enabled);
+
+      // If motion is disabled and currently detecting, clear it
+      if (!enabled && this.motionDetected) {
+        this.clearMotion();
+      }
+    } else {
+      // Revert the switch state on failure
+      setTimeout(() => {
+        this.motionSwitch.updateCharacteristic(this.platform.Characteristic.On, this.isMotionEnabled);
+      }, 100);
     }
   }
 
@@ -193,6 +208,21 @@ export class CameraAccessory {
   public handleLedSettingsUpdate(ledSettings: LedSettings): void {
     this.ledEnabled = ledSettings.isEnabled;
     this.updateLedSwitchState(ledSettings.isEnabled);
+  }
+
+  public handleRecordingSettingsUpdate(enableMotionDetection: boolean): void {
+    this.isMotionEnabled = enableMotionDetection;
+    this.updateMotionSwitchState(enableMotionDetection);
+    this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, enableMotionDetection);
+
+    // If motion is disabled and currently detecting, clear it
+    if (!enableMotionDetection && this.motionDetected) {
+      this.clearMotion();
+    }
+  }
+
+  private updateMotionSwitchState(enabled: boolean): void {
+    this.motionSwitch.updateCharacteristic(this.platform.Characteristic.On, enabled);
   }
 
   private updateLedSwitchState(enabled: boolean): void {
