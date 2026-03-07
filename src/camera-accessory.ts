@@ -147,6 +147,12 @@ export class CameraAccessory {
     if (success) {
       this.ledEnabled = enabled;
     } else {
+      // API returned false - likely throttled or connection issue
+      this.platform.log.warn(
+        `Unable to update LED for ${this.camera.name}. ` +
+          `The Protect API may be throttled or unreachable. ` +
+          `If this persists, restart Homebridge.`,
+      );
       // Revert the switch state on failure
       setTimeout(() => {
         this.ledSwitch.updateCharacteristic(this.platform.Characteristic.On, this.ledEnabled);
