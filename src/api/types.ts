@@ -9,8 +9,9 @@ export interface ProtectCamera {
     isEnabled: boolean;
     blinkRate: number;
   };
-  recordingSettings?: {
-    enableMotionDetection: boolean;
+  motionSettings?: {
+    isEnabled: boolean;
+    sensitivity: number;
   };
 }
 
@@ -33,6 +34,7 @@ export interface LedSettings {
   blinkRate?: number;
 }
 
-export interface RecordingSettings {
-  enableMotionDetection: boolean;
+export interface MotionSettings {
+  isEnabled: boolean;
+  sensitivity?: number;
 }

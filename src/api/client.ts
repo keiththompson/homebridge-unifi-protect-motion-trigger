@@ -2,7 +2,7 @@ import type { Logging } from 'homebridge';
 import { ProtectApi } from 'unifi-protect';
 
 import { ProtectApiError } from './errors.js';
-import type { LedSettings, ProtectBootstrap, ProtectCamera, ProtectEventPacket, RecordingSettings } from './types.js';
+import type { LedSettings, MotionSettings, ProtectBootstrap, ProtectCamera, ProtectEventPacket } from './types.js';
 
 export type MessageHandler = (packet: ProtectEventPacket) => void;
 
@@ -102,8 +102,8 @@ export class ProtectClient {
     }
 
     try {
-      const payload: { recordingSettings: RecordingSettings } = {
-        recordingSettings: { enableMotionDetection: enabled },
+      const payload: { motionSettings: MotionSettings } = {
+        motionSettings: { isEnabled: enabled },
       };
 
       const result = await this.api.updateDevice(camera as never, payload as never);
