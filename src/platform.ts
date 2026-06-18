@@ -202,10 +202,10 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       cameraAccessory.handleLedSettingsUpdate(cameraPayload.ledSettings);
     }
 
-    // Check for recording settings update (motion detection toggle)
-    if (cameraPayload.recordingSettings?.enableMotionDetection !== undefined) {
-      this.debugLog(`Recording settings updated on camera ${id}`);
-      cameraAccessory.handleRecordingSettingsUpdate(cameraPayload.recordingSettings.enableMotionDetection);
+    // Check for motion settings update (motion detection toggle)
+    if (cameraPayload.motionSettings?.isEnabled !== undefined) {
+      this.debugLog(`Motion settings updated on camera ${id}`);
+      cameraAccessory.handleMotionSettingsUpdate(cameraPayload.motionSettings.isEnabled);
     }
   }
 

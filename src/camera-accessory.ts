@@ -24,7 +24,7 @@ export class CameraAccessory {
     this.ledEnabled = camera.ledSettings?.isEnabled ?? true;
 
     // Initialize motion enabled state from camera's actual settings
-    const motionEnabled = camera.recordingSettings?.enableMotionDetection ?? true;
+    const motionEnabled = camera.motionSettings?.isEnabled ?? true;
     this.isMotionEnabled = motionEnabled;
 
     this.configureAccessoryInformation(camera);
@@ -216,13 +216,13 @@ export class CameraAccessory {
     this.updateLedSwitchState(ledSettings.isEnabled);
   }
 
-  public handleRecordingSettingsUpdate(enableMotionDetection: boolean): void {
-    this.isMotionEnabled = enableMotionDetection;
-    this.updateMotionSwitchState(enableMotionDetection);
-    this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, enableMotionDetection);
+  public handleMotionSettingsUpdate(isEnabled: boolean): void {
+    this.isMotionEnabled = isEnabled;
+    this.updateMotionSwitchState(isEnabled);
+    this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, isEnabled);
 
     // If motion is disabled and currently detecting, clear it
-    if (!enableMotionDetection && this.motionDetected) {
+    if (!isEnabled && this.motionDetected) {
       this.clearMotion();
     }
   }
