@@ -70,4 +70,4 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
       - run: npm ci
-      - run: npm audit
+      - run: npm audit --audit-level=critical
