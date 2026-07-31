@@ -38,3 +38,13 @@ export interface MotionSettings {
   isEnabled: boolean;
   sensitivity?: number;
 }
+
+/**
+ * Outcome of a device settings write.
+ *
+ * - `ok`: the controller accepted the change.
+ * - `throttled`: the Protect API is pausing calls after repeated errors; the write was not attempted.
+ * - `unauthorized`: the configured account lacks admin privileges required to change device settings.
+ * - `failed`: the controller rejected the write or the client is not connected.
+ */
+export type UpdateResult = 'ok' | 'throttled' | 'unauthorized' | 'failed';
