@@ -154,11 +154,7 @@ export class ProtectClient {
     return run;
   }
 
-  private async performUpdate(
-    camera: ProtectCamera,
-    payload: object,
-    successMessage: string,
-  ): Promise<UpdateResult> {
+  private async performUpdate(camera: ProtectCamera, payload: object, successMessage: string): Promise<UpdateResult> {
     if (!this.connected) {
       this.log.error(`Cannot update ${camera.name}: not connected`);
       return 'failed';
