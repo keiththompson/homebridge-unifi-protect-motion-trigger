@@ -1,3 +1,6 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from 'homebridge';
 
 import { ProtectClient } from './api/client.js';
@@ -5,7 +8,12 @@ import { ProtectApiError } from './api/errors.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
 import type { ControllerConfig, ProtectMotionPlatformConfig } from './settings.js';
-import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
+import { DEFAULT_MOTION_DURATION, HEALTH_FILENAME, PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
+
+// How often the aggregated health snapshot is flushed to disk. The monitor
+// treats a snapshot older than a few minutes as stale, so this must be well
+// under that threshold.
+const HEALTH_WRITE_INTERVAL_MS = 30_000;
 
 export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   public readonly accessories: PlatformAccessory[] = [];
@@ -13,6 +21,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   private readonly clients: Map<string, ProtectClient> = new Map();
   private readonly motionDuration: number;
   private readonly debug: boolean;
+  private healthWriter: ReturnType<typeof setInterval> | null = null;
 
   public get Service(): typeof this.api.hap.Service {
     return this.api.hap.Service;
@@ -33,16 +42,21 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
     this.log.info('Initializing platform:', PLATFORM_NAME);
 
-    this.api.on('didFinishLaunching', () => {
+    this.api.on('didFinishLaunching', async () => {
       this.debugLog('Finished launching, discovering controllers...');
-      this.discoverControllers(platformConfig.controllers ?? []);
+      await this.discoverControllers(platformConfig.controllers ?? []);
+      this.startHealthReporting();
     });
 
     this.api.on('shutdown', () => {
       this.log.info('Shutting down, closing API connections...');
+      this.stopHealthReporting();
       for (const client of this.clients.values()) {
         client.disconnect();
       }
+      // One final snapshot so the monitor sees a clean, disconnected state
+      // rather than a stale "connected" one left over from before shutdown.
+      this.writeHealthFile();
     });
   }
 
@@ -173,11 +187,11 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   }
 
   private handleProtectMessage(_controllerAddress: string, packet: ProtectEventPacket): void {
-    if (!packet.action || !packet.payload) {
+    if (!packet.header || !packet.payload) {
       return;
     }
 
-    const { action, modelKey, id } = packet.action;
+    const { action, modelKey, id } = packet.header;
 
     if (modelKey !== 'camera' || action !== 'update') {
       return;
@@ -206,6 +220,61 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     if (cameraPayload.motionSettings?.isEnabled !== undefined) {
       this.debugLog(`Motion settings updated on camera ${id}`);
       cameraAccessory.handleMotionSettingsUpdate(cameraPayload.motionSettings.isEnabled);
+    }
+  }
+
+  private startHealthReporting(): void {
+    if (this.healthWriter) {
+      return;
+    }
+    this.writeHealthFile();
+    this.healthWriter = setInterval(() => this.writeHealthFile(), HEALTH_WRITE_INTERVAL_MS);
+    this.healthWriter.unref?.();
+  }
+
+  private stopHealthReporting(): void {
+    if (this.healthWriter) {
+      clearInterval(this.healthWriter);
+      this.healthWriter = null;
+    }
+  }
+
+  /**
+   * Flushes an aggregated connection-health snapshot to the Homebridge storage
+   * dir. Best-effort: failures (or a host API without a storage path, as in
+   * tests) are swallowed so monitoring never affects the plugin's operation.
+   */
+  private writeHealthFile(): void {
+    const storagePath = this.api.user?.storagePath?.();
+    if (!storagePath) {
+      return;
+    }
+
+    const toIso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
+
+    const now = Date.now();
+    const snapshot = {
+      updatedAt: new Date(now).toISOString(),
+      // Unambiguous (UTC) epoch seconds so the monitor needn't parse a date string.
+      updatedAtEpoch: Math.floor(now / 1000),
+      controllers: [...this.clients.values()].map((client) => {
+        const health = client.health;
+        return {
+          address: health.address,
+          connected: health.connected,
+          reconnecting: health.reconnecting,
+          consecutiveFailures: health.consecutiveFailures,
+          cameras: health.cameras,
+          lastEventAt: toIso(health.lastEventAt),
+          lastBootstrapAt: toIso(health.lastBootstrapAt),
+        };
+      }),
+    };
+
+    try {
+      writeFileSync(join(storagePath, HEALTH_FILENAME), JSON.stringify(snapshot, null, 2));
+    } catch (error) {
+      this.debugLog(`Could not write health file: ${error instanceof Error ? error.message : 'unknown error'}`);
     }
   }
 

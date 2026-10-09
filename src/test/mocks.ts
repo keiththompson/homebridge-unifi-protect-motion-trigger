@@ -94,6 +94,9 @@ export function createMockAPI(): API {
       }
       eventHandlers.get(event)!.push(handler);
     }),
+    user: {
+      storagePath: vi.fn(() => '/tmp/home-monitor-test'),
+    },
     platformAccessory: vi.fn((name: string, uuid: string) => createMockAccessory(name, uuid)),
     registerPlatformAccessories: vi.fn((_pluginName: string, _platformName: string, accs: PlatformAccessory[]) => {
       accessories.push(...accs);

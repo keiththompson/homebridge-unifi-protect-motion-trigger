@@ -21,7 +21,10 @@ export interface ProtectBootstrap {
 }
 
 export interface ProtectEventPacket {
-  action?: {
+  // The unifi-protect library delivers realtime packets as { header, payload }.
+  // The action/modelKey/id live on the header — reading them off any other key
+  // silently drops every packet (see handleProtectMessage).
+  header?: {
     action: string;
     modelKey: string;
     id: string;
