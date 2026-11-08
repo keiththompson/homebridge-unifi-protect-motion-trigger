@@ -15,12 +15,22 @@ export function createMockLogger(): Logging {
 }
 
 export function createMockCharacteristic(): Characteristic {
+  let getHandler: (() => unknown) | undefined;
+  let setHandler: ((value: unknown) => unknown) | undefined;
   const mock = {
-    onGet: vi.fn().mockReturnThis(),
-    onSet: vi.fn().mockReturnThis(),
+    onGet: vi.fn((handler: () => unknown) => {
+      getHandler = handler;
+      return mock;
+    }),
+    onSet: vi.fn((handler: (value: unknown) => unknown) => {
+      setHandler = handler;
+      return mock;
+    }),
     setProps: vi.fn().mockReturnThis(),
     updateValue: vi.fn().mockReturnThis(),
     value: null,
+    invokeGet: () => getHandler?.(),
+    invokeSet: (value: unknown) => setHandler?.(value),
   };
   return mock as unknown as Characteristic;
 }
@@ -46,16 +56,19 @@ export function createMockService(): Service {
 
 export function createMockAccessory(displayName: string, uuid: string): PlatformAccessory {
   const services = new Map<string, Service>();
+  const servicesBySubtype = new Map<string, Service>();
 
   const mock = {
     displayName,
     UUID: uuid,
-    context: {},
+    context: {} as Record<string, unknown>,
     getService: vi.fn((type: unknown) => services.get(String(type))),
     getServiceById: vi.fn((_type: unknown, _subtype: string) => undefined),
-    addService: vi.fn((type: unknown, name: string, subtype: string) => {
+    getServiceBySubtype: (subtype: string) => servicesBySubtype.get(subtype),
+    addService: vi.fn((type: unknown, _name: string, subtype: string) => {
       const service = createMockService();
-      services.set(`${type}-${subtype}`, service);
+      services.set(`${String(type)}-${subtype}`, service);
+      servicesBySubtype.set(subtype, service);
       return service;
     }),
   };
@@ -94,7 +107,9 @@ export function createMockAPI(): API {
       }
       eventHandlers.get(event)!.push(handler);
     }),
-    platformAccessory: vi.fn((name: string, uuid: string) => createMockAccessory(name, uuid)),
+    platformAccessory: vi.fn(function (name: string, uuid: string) {
+      return createMockAccessory(name, uuid);
+    }),
     registerPlatformAccessories: vi.fn((_pluginName: string, _platformName: string, accs: PlatformAccessory[]) => {
       accessories.push(...accs);
     }),

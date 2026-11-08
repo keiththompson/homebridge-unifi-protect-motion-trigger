@@ -2,15 +2,25 @@ import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformCo
 
 import { ProtectClient } from './api/client.js';
 import { ProtectApiError } from './api/errors.js';
+import { smartDetectPreferencesSaved } from './api/motion-state.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
+import type { HealthControllerInput, PluginHealth } from './health.js';
+import { buildHealthReport } from './health.js';
 import type { ControllerConfig, ProtectMotionPlatformConfig } from './settings.js';
-import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
+import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME, PLUGIN_VERSION } from './settings.js';
+
+interface ControllerSession {
+  client: ProtectClient;
+  connected: boolean;
+  /** Fixed phrase safe for health output. Never a credential. */
+  lastError: string | null;
+}
 
 export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   public readonly accessories: PlatformAccessory[] = [];
   private readonly configuredAccessories: Map<string, CameraAccessory> = new Map();
-  private readonly clients: Map<string, ProtectClient> = new Map();
+  private readonly sessions = new Map<string, ControllerSession>();
   private readonly motionDuration: number;
   private readonly debug: boolean;
 
@@ -40,9 +50,46 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
     this.api.on('shutdown', () => {
       this.log.info('Shutting down, closing API connections...');
-      for (const client of this.clients.values()) {
-        client.disconnect();
+      for (const session of this.sessions.values()) {
+        session.client.disconnect();
       }
+    });
+  }
+
+  /**
+   * Health snapshot for routine checks.
+   * `refresh` re-reads each camera with GET and does not change camera settings.
+   * The document has no usernames, passwords, or tokens.
+   */
+  public async getHealth(options?: { refresh?: boolean; now?: number }): Promise<PluginHealth> {
+    const now = options?.now ?? Date.now();
+    if (options?.refresh) {
+      for (const session of this.sessions.values()) {
+        if (!session.connected) {
+          continue;
+        }
+        for (const camera of session.client.cameras) {
+          await session.client.refreshCamera(camera);
+        }
+      }
+    }
+
+    const controllers: HealthControllerInput[] = [];
+    for (const [address, session] of this.sessions) {
+      controllers.push({
+        address,
+        connected: session.connected,
+        throttled: session.connected ? session.client.isThrottled : false,
+        admin: session.connected ? session.client.isAdminUser : null,
+        lastError: session.lastError,
+        cameras: session.connected ? this.healthCameras(session.client) : [],
+      });
+    }
+
+    return buildHealthReport({
+      pluginVersion: PLUGIN_VERSION,
+      generatedAt: now,
+      controllers,
     });
   }
 
@@ -89,10 +136,19 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       const success = await client.connect(controller.address, controller.username, controller.password);
 
       if (!success) {
+        this.sessions.set(controller.address, {
+          client,
+          connected: false,
+          lastError: 'connection failed',
+        });
         return;
       }
 
-      this.clients.set(controller.address, client);
+      this.sessions.set(controller.address, {
+        client,
+        connected: true,
+        lastError: null,
+      });
 
       const cameras = client.cameras;
       if (cameras.length === 0) {
@@ -108,16 +164,33 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
         this.handleProtectMessage(controller.address, packet);
       });
     } catch (error) {
-      if (error instanceof ProtectApiError) {
-        if (error.isAuthError) {
-          this.log.error(`Authentication failed for ${controller.address}. Check your credentials.`);
-        } else {
-          this.log.error(`API error for ${controller.address}: ${error.message}`);
-        }
+      const authenticationFailed = error instanceof ProtectApiError && error.isAuthError;
+      this.sessions.set(controller.address, {
+        client,
+        connected: false,
+        lastError: authenticationFailed ? 'authentication failed' : 'connection failed',
+      });
+      if (authenticationFailed) {
+        this.log.error(`Authentication failed for ${controller.address}. Check your credentials.`);
+      } else if (error instanceof ProtectApiError) {
+        this.log.error(`API error for ${controller.address}: ${error.message}`);
       } else {
         this.log.error(`Error connecting to ${controller.address}:`, error);
       }
     }
+  }
+
+  private healthCameras(client: ProtectClient): HealthControllerInput['cameras'] {
+    return client.cameras.map((camera) => {
+      const accessory = this.configuredAccessories.get(camera.id);
+      return {
+        id: camera.id,
+        name: camera.name,
+        intendedMotionEnabled: accessory ? accessory.motionEnabledState : null,
+        smartDetectPreferencesSaved: smartDetectPreferencesSaved(accessory?.savedSmartDetectPreferences),
+        snapshot: client.getCameraSnapshot(camera.id),
+      };
+    });
   }
 
   private configureCameras(client: ProtectClient, cameras: ProtectCamera[], controllerAddress: string): void {
@@ -202,10 +275,15 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       cameraAccessory.handleLedSettingsUpdate(cameraPayload.ledSettings);
     }
 
-    // Check for motion settings update (motion detection toggle)
-    if (cameraPayload.motionSettings?.isEnabled !== undefined) {
-      this.debugLog(`Motion settings updated on camera ${id}`);
-      cameraAccessory.handleMotionSettingsUpdate(cameraPayload.motionSettings.isEnabled);
+    // Sensor-shaped motionSettings is ignored. Create Motion Events arrives as recordingSettings.
+    if (typeof cameraPayload.recordingSettings?.enableMotionDetection === 'boolean') {
+      this.debugLog(`Create Motion Events updated on camera ${id}`);
+      cameraAccessory.handleCreateMotionEventsUpdate(cameraPayload.recordingSettings.enableMotionDetection);
+    }
+
+    if (cameraPayload.smartDetectSettings) {
+      this.debugLog(`Smart detection settings updated on camera ${id}`);
+      cameraAccessory.handleSmartDetectSettingsUpdate(cameraPayload.smartDetectSettings);
     }
   }
 

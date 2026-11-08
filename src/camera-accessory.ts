@@ -1,7 +1,14 @@
 import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
 
 import type { ProtectClient } from './api/client.js';
-import type { LedSettings, ProtectCamera, UpdateResult } from './api/types.js';
+import { observeSmartDetectPreferences } from './api/motion-state.js';
+import type {
+  LedSettings,
+  ProtectCamera,
+  SmartDetectPreferences,
+  SmartDetectSettings,
+  UpdateResult,
+} from './api/types.js';
 import type { ProtectMotionPlatform } from './platform.js';
 
 // Window over which a camera's LED and motion writes are coalesced into one request.
@@ -35,8 +42,12 @@ export class CameraAccessory {
     const camera = this.camera;
     this.ledEnabled = camera.ledSettings?.isEnabled ?? true;
 
-    // Initialize motion enabled state from camera's actual settings
-    const motionEnabled = camera.motionSettings?.isEnabled ?? true;
+    // Create Motion Events is recordingSettings.enableMotionDetection.
+    // motionSettings is a sensor field and is null on current cameras, so it must not seed the switch.
+    const motionEnabled =
+      typeof camera.recordingSettings?.enableMotionDetection === 'boolean'
+        ? camera.recordingSettings.enableMotionDetection
+        : true;
     this.isMotionEnabled = motionEnabled;
 
     this.configureAccessoryInformation(camera);
@@ -60,6 +71,26 @@ export class CameraAccessory {
 
   private set isMotionEnabled(value: boolean) {
     this.accessory.context.motionEnabled = value;
+  }
+
+  public get motionEnabledState(): boolean {
+    return this.isMotionEnabled;
+  }
+
+  public get savedSmartDetectPreferences(): SmartDetectPreferences | null {
+    return this.smartDetectPreferences;
+  }
+
+  private get smartDetectPreferences(): SmartDetectPreferences | null {
+    const stored = this.accessory.context.smartDetectPreferences as SmartDetectPreferences | undefined;
+    if (!stored) {
+      return null;
+    }
+    return stored;
+  }
+
+  private set smartDetectPreferences(value: SmartDetectPreferences | null) {
+    this.accessory.context.smartDetectPreferences = value;
   }
 
   private configureAccessoryInformation(camera: ProtectCamera): void {
@@ -179,12 +210,18 @@ export class CameraAccessory {
       }
 
       this.platform.debugLog(`Applying settings for ${this.camera.name}: ${JSON.stringify(settings)}`);
-      const result = await this.client.updateCameraSettings(this.camera, settings);
+      const outcome = await this.client.updateCameraSettings(this.camera, {
+        ...settings,
+        smartDetectPreferences: settings.motion !== undefined ? this.smartDetectPreferences : undefined,
+      });
+      if (settings.motion !== undefined && outcome.smartDetectPreferences) {
+        this.smartDetectPreferences = outcome.smartDetectPreferences;
+      }
 
-      if (result === 'ok') {
+      if (outcome.result === 'ok') {
         this.applySettings(settings);
       } else {
-        this.revertSettings(settings, result);
+        this.revertSettings(settings, outcome.result);
       }
     } finally {
       resolve?.();
@@ -239,6 +276,12 @@ export class CameraAccessory {
         this.platform.log.warn(
           `Unable to update ${setting} for ${this.camera.name}: the configured account is not a ` +
             `Protect admin and cannot change device settings.`,
+        );
+        break;
+      case 'mismatch':
+        this.platform.log.warn(
+          `Unable to update ${setting} for ${this.camera.name}: Protect readback does not match the ` +
+            `requested state. The change was not applied in HomeKit.`,
         );
         break;
       default:
@@ -305,15 +348,22 @@ export class CameraAccessory {
     this.updateLedSwitchState(ledSettings.isEnabled);
   }
 
-  public handleMotionSettingsUpdate(isEnabled: boolean): void {
+  public handleCreateMotionEventsUpdate(isEnabled: boolean): void {
     this.isMotionEnabled = isEnabled;
     this.updateMotionSwitchState(isEnabled);
     this.motionSensor.updateCharacteristic(this.platform.Characteristic.StatusActive, isEnabled);
 
-    // If motion is disabled and currently detecting, clear it
     if (!isEnabled && this.motionDetected) {
       this.clearMotion();
     }
+  }
+
+  public handleSmartDetectSettingsUpdate(settings: SmartDetectSettings): void {
+    this.smartDetectPreferences = observeSmartDetectPreferences(
+      this.smartDetectPreferences,
+      settings,
+      this.isMotionEnabled,
+    );
   }
 
   private updateMotionSwitchState(enabled: boolean): void {
