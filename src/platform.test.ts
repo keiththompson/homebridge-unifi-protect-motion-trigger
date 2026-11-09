@@ -102,7 +102,7 @@ describe('ProtectMotionPlatform health', () => {
     expect(text).not.toContain('homebridge-user');
     expect(text).toContain('10.0.0.5');
     expect(health.schemaVersion).toBe('1.1.0');
-    expect(health.pluginVersion).toBe('1.1.0');
+    expect(health.pluginVersion).toBe('1.0.10');
     expect(health.controllers[0]?.cameras[0]).toMatchObject({
       id: 'cam1',
       createMotionEvents: true,
