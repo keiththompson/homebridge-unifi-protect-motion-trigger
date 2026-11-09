@@ -1,7 +1,12 @@
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { PlatformAccessory, Service } from 'homebridge';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ProtectMotionPlatform } from './platform.js';
+import { HEALTH_FILENAME } from './settings.js';
 import { createMockAPI, createMockConfig, createMockLogger } from './test/mocks.js';
 
 const apiState = vi.hoisted(() => {
@@ -102,7 +107,7 @@ describe('ProtectMotionPlatform health', () => {
     expect(text).not.toContain('homebridge-user');
     expect(text).toContain('10.0.0.5');
     expect(health.schemaVersion).toBe('1.1.0');
-    expect(health.pluginVersion).toBe('1.0.10');
+    expect(health.pluginVersion).toBe('1.0.11');
     expect(health.controllers[0]?.cameras[0]).toMatchObject({
       id: 'cam1',
       createMotionEvents: true,
@@ -162,5 +167,73 @@ describe('ProtectMotionPlatform health', () => {
     expect(health.controllers[0]?.connected).toBe(false);
     expect(JSON.stringify(health)).not.toContain('super-secret-password');
     expect(JSON.stringify(health)).not.toContain('homebridge-user');
+  });
+});
+
+describe('ProtectMotionPlatform health file', () => {
+  beforeEach(() => {
+    apiState.listeners.clear();
+    apiState.login.mockResolvedValue(true);
+    apiState.camera.recordingSettings.enableMotionDetection = true;
+    apiState.camera.motionSettings = null;
+    apiState.camera.smartDetectSettings = {
+      objectTypes: ['person'],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+    };
+  });
+
+  it('writes a home-monitor-compatible snapshot after bootstrap and marks disconnect on shutdown', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-health-platform-'));
+    const hap = createMockAPI({ storagePath: dir });
+    new ProtectMotionPlatform(
+      createMockLogger(),
+      createMockConfig({
+        controllers: [
+          {
+            address: '10.0.0.5',
+            username: 'homebridge-user',
+            password: 'super-secret-password',
+          },
+        ],
+      }),
+      hap,
+    );
+
+    (hap as unknown as { emit: (event: string) => void }).emit('didFinishLaunching');
+    const file = join(dir, HEALTH_FILENAME);
+    await vi.waitFor(() => {
+      expect(existsSync(file)).toBe(true);
+    });
+
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+      pluginVersion: string;
+      schemaVersion: string;
+      updatedAtEpoch: number;
+      controllers: Array<{
+        connected: boolean;
+        cameras: number;
+        cameraHealth: Array<{ readback: { status: string }; drift: boolean | null }>;
+      }>;
+    };
+    expect(parsed.pluginVersion).toBe('1.0.11');
+    expect(parsed.schemaVersion).toBe('1.1.0');
+    expect(typeof parsed.updatedAtEpoch).toBe('number');
+    expect(parsed.controllers[0]?.connected).toBe(true);
+    expect(parsed.controllers[0]?.cameras).toBe(1);
+    expect(typeof parsed.controllers[0]?.cameras).toBe('number');
+    expect(parsed.controllers.map((controller) => controller.cameras).reduce((sum, count) => sum + count, 0)).toBe(1);
+    expect(parsed.controllers[0]?.cameraHealth[0]).toMatchObject({
+      readback: { status: 'verified' },
+      drift: false,
+    });
+    expect(JSON.stringify(parsed)).not.toContain('super-secret-password');
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+
+    (hap as unknown as { emit: (event: string) => void }).emit('shutdown');
+    await vi.waitFor(() => {
+      const after = JSON.parse(readFileSync(file, 'utf8')) as typeof parsed;
+      expect(after.controllers[0]?.connected).toBe(false);
+    });
   });
 });

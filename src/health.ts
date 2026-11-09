@@ -1,6 +1,10 @@
+import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { MotionDiagnostics } from './api/motion-state.js';
 import { motionDrift, readMotionDiagnostics } from './api/motion-state.js';
 import type { ProtectCamera, SmartDetectPreferences } from './api/types.js';
+import { HEALTH_FILENAME } from './settings.js';
 
 /**
  * First health document published by this plugin.
@@ -246,4 +250,88 @@ function emptyCameraHealth(camera: HealthCameraInput): CameraHealth {
       attempts: null,
     },
   };
+}
+
+export interface HealthFileCompat {
+  reconnecting: boolean;
+  consecutiveFailures: number;
+  lastEventAt: string | null;
+  lastBootstrapAt: string | null;
+}
+
+/**
+ * On-disk document for home-monitor. `controllers[].cameras` stays a count because
+ * home-monitor sums that field (`[.controllers[]?.cameras] | add`). Per-camera
+ * schema 1.1.0 details live on `cameraHealth`.
+ */
+export interface PersistedControllerHealth extends HealthFileCompat {
+  address: string;
+  connected: boolean;
+  throttled: boolean;
+  admin: boolean | null;
+  lastError: string | null;
+  cameras: number;
+  cameraHealth: CameraHealth[];
+}
+
+export interface PersistedPluginHealth {
+  schemaVersion: typeof HEALTH_SCHEMA_VERSION;
+  pluginVersion: string;
+  generatedAt: string;
+  updatedAt: string;
+  updatedAtEpoch: number;
+  readbackStaleAfterMs: number;
+  controllers: PersistedControllerHealth[];
+}
+
+export function toPersistedHealth(
+  health: PluginHealth,
+  now: number,
+  compat: Record<string, Partial<HealthFileCompat>> = {},
+): PersistedPluginHealth {
+  return {
+    schemaVersion: health.schemaVersion,
+    pluginVersion: health.pluginVersion,
+    generatedAt: health.generatedAt,
+    updatedAt: new Date(now).toISOString(),
+    updatedAtEpoch: Math.floor(now / 1000),
+    readbackStaleAfterMs: health.readbackStaleAfterMs,
+    controllers: health.controllers.map((controller) => {
+      const extra = compat[controller.address] ?? {};
+      return {
+        address: controller.address,
+        connected: controller.connected,
+        throttled: controller.throttled,
+        admin: controller.admin,
+        lastError: controller.lastError,
+        reconnecting: extra.reconnecting ?? false,
+        consecutiveFailures: extra.consecutiveFailures ?? 0,
+        cameras: controller.cameras.length,
+        lastEventAt: extra.lastEventAt ?? null,
+        lastBootstrapAt: extra.lastBootstrapAt ?? null,
+        cameraHealth: controller.cameras,
+      };
+    }),
+  };
+}
+
+/** Best-effort atomic write: temp file in the same directory, then rename. */
+export function writeHealthFileAtomic(
+  storagePath: string,
+  document: PersistedPluginHealth,
+  filename: string = HEALTH_FILENAME,
+): void {
+  const dest = join(storagePath, filename);
+  const tmp = `${dest}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(document, null, 2)}\n`);
+  try {
+    renameSync(tmp, dest);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // ignore cleanup failure
+    }
+    throw error;
+  }
 }

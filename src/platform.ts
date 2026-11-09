@@ -6,15 +6,25 @@ import { smartDetectPreferencesSaved } from './api/motion-state.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
 import type { HealthControllerInput, PluginHealth } from './health.js';
-import { buildHealthReport } from './health.js';
+import { buildHealthReport, toPersistedHealth, writeHealthFileAtomic } from './health.js';
 import type { ControllerConfig, ProtectMotionPlatformConfig } from './settings.js';
-import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME, PLUGIN_VERSION } from './settings.js';
+import {
+  DEFAULT_MOTION_DURATION,
+  HEALTH_WRITE_INTERVAL_MS,
+  PLATFORM_NAME,
+  PLUGIN_NAME,
+  PLUGIN_VERSION,
+} from './settings.js';
 
 interface ControllerSession {
   client: ProtectClient;
   connected: boolean;
   /** Fixed phrase safe for health output. Never a credential. */
   lastError: string | null;
+  reconnecting: boolean;
+  consecutiveFailures: number;
+  lastEventAt: number | null;
+  lastBootstrapAt: number | null;
 }
 
 export class ProtectMotionPlatform implements DynamicPlatformPlugin {
@@ -23,6 +33,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   private readonly sessions = new Map<string, ControllerSession>();
   private readonly motionDuration: number;
   private readonly debug: boolean;
+  private healthWriter: ReturnType<typeof setInterval> | null = null;
 
   public get Service(): typeof this.api.hap.Service {
     return this.api.hap.Service;
@@ -45,14 +56,19 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
     this.api.on('didFinishLaunching', () => {
       this.debugLog('Finished launching, discovering controllers...');
-      this.discoverControllers(platformConfig.controllers ?? []);
+      void this.discoverControllers(platformConfig.controllers ?? []).then(() => {
+        this.startHealthReporting();
+      });
     });
 
     this.api.on('shutdown', () => {
       this.log.info('Shutting down, closing API connections...');
+      this.stopHealthReporting();
       for (const session of this.sessions.values()) {
         session.client.disconnect();
+        session.connected = false;
       }
+      this.persistHealthFile();
     });
   }
 
@@ -130,29 +146,38 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   }
 
   private async connectToController(controller: ControllerConfig): Promise<void> {
-    const client = new ProtectClient(this.log);
+    const client = new ProtectClient(this.log, {
+      onHealthChange: () => {
+        this.persistHealthFile();
+      },
+    });
 
     try {
       const success = await client.connect(controller.address, controller.username, controller.password);
 
       if (!success) {
-        this.sessions.set(controller.address, {
+        this.rememberSession(controller.address, {
           client,
           connected: false,
           lastError: 'connection failed',
         });
+        this.persistHealthFile();
         return;
       }
 
-      this.sessions.set(controller.address, {
+      this.rememberSession(controller.address, {
         client,
         connected: true,
         lastError: null,
+        reconnecting: false,
+        consecutiveFailures: 0,
+        lastBootstrapAt: Date.now(),
       });
 
       const cameras = client.cameras;
       if (cameras.length === 0) {
         this.log.warn(`No cameras found on controller ${controller.address}`);
+        this.persistHealthFile();
         return;
       }
 
@@ -163,9 +188,10 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       client.onMessage((packet: ProtectEventPacket) => {
         this.handleProtectMessage(controller.address, packet);
       });
+      this.persistHealthFile();
     } catch (error) {
       const authenticationFailed = error instanceof ProtectApiError && error.isAuthError;
-      this.sessions.set(controller.address, {
+      this.rememberSession(controller.address, {
         client,
         connected: false,
         lastError: authenticationFailed ? 'authentication failed' : 'connection failed',
@@ -177,7 +203,27 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       } else {
         this.log.error(`Error connecting to ${controller.address}:`, error);
       }
+      this.persistHealthFile();
     }
+  }
+
+  private rememberSession(
+    address: string,
+    patch: Partial<ControllerSession> & Pick<ControllerSession, 'client' | 'connected' | 'lastError'>,
+  ): void {
+    const previous = this.sessions.get(address);
+    const failed = !patch.connected;
+    this.sessions.set(address, {
+      client: patch.client,
+      connected: patch.connected,
+      lastError: patch.lastError,
+      reconnecting: patch.reconnecting ?? previous?.reconnecting ?? false,
+      consecutiveFailures:
+        patch.consecutiveFailures ??
+        (failed ? (previous?.consecutiveFailures ?? 0) + 1 : (previous?.consecutiveFailures ?? 0)),
+      lastEventAt: patch.lastEventAt ?? previous?.lastEventAt ?? null,
+      lastBootstrapAt: patch.lastBootstrapAt ?? previous?.lastBootstrapAt ?? null,
+    });
   }
 
   private healthCameras(client: ProtectClient): HealthControllerInput['cameras'] {
@@ -245,7 +291,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private handleProtectMessage(_controllerAddress: string, packet: ProtectEventPacket): void {
+  private handleProtectMessage(controllerAddress: string, packet: ProtectEventPacket): void {
     if (!packet.action || !packet.payload) {
       return;
     }
@@ -262,28 +308,112 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
 
     const cameraPayload = packet.payload;
+    const session = this.sessions.get(controllerAddress);
+    let settingsChanged = false;
 
     // Check for motion update
     if (cameraPayload.lastMotion !== undefined) {
       this.debugLog(`Motion detected on camera ${id}`);
       cameraAccessory.handleMotionEvent(cameraPayload.lastMotion);
+      if (session) {
+        session.lastEventAt = Date.now();
+      }
     }
 
     // Check for LED settings update
     if (cameraPayload.ledSettings !== undefined) {
       this.debugLog(`LED settings updated on camera ${id}`);
       cameraAccessory.handleLedSettingsUpdate(cameraPayload.ledSettings);
+      settingsChanged = true;
     }
 
     // Sensor-shaped motionSettings is ignored. Create Motion Events arrives as recordingSettings.
     if (typeof cameraPayload.recordingSettings?.enableMotionDetection === 'boolean') {
       this.debugLog(`Create Motion Events updated on camera ${id}`);
       cameraAccessory.handleCreateMotionEventsUpdate(cameraPayload.recordingSettings.enableMotionDetection);
+      settingsChanged = true;
     }
 
     if (cameraPayload.smartDetectSettings) {
       this.debugLog(`Smart detection settings updated on camera ${id}`);
       cameraAccessory.handleSmartDetectSettingsUpdate(cameraPayload.smartDetectSettings);
+      settingsChanged = true;
+    }
+
+    if (settingsChanged) {
+      if (session) {
+        session.lastEventAt = Date.now();
+      }
+      this.persistHealthFile();
+    }
+  }
+
+  private startHealthReporting(): void {
+    if (this.healthWriter) {
+      return;
+    }
+    this.persistHealthFile();
+    if (!this.healthStoragePath()) {
+      return;
+    }
+    this.healthWriter = setInterval(() => {
+      this.persistHealthFile();
+    }, HEALTH_WRITE_INTERVAL_MS);
+    this.healthWriter.unref?.();
+  }
+
+  private stopHealthReporting(): void {
+    if (this.healthWriter) {
+      clearInterval(this.healthWriter);
+      this.healthWriter = null;
+    }
+  }
+
+  private healthStoragePath(): string | undefined {
+    const storagePath = this.api.user?.storagePath?.();
+    return storagePath || undefined;
+  }
+
+  private healthCompat(): Record<
+    string,
+    { reconnecting: boolean; consecutiveFailures: number; lastEventAt: string | null; lastBootstrapAt: string | null }
+  > {
+    const toIso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
+    const compat: Record<
+      string,
+      { reconnecting: boolean; consecutiveFailures: number; lastEventAt: string | null; lastBootstrapAt: string | null }
+    > = {};
+    for (const [address, session] of this.sessions) {
+      compat[address] = {
+        reconnecting: session.reconnecting,
+        consecutiveFailures: session.consecutiveFailures,
+        lastEventAt: toIso(session.lastEventAt),
+        lastBootstrapAt: toIso(session.lastBootstrapAt),
+      };
+    }
+    return compat;
+  }
+
+  /**
+   * Flushes an aggregated health snapshot to the Homebridge storage dir.
+   * Best-effort: failures (or a host API without a storage path, as in tests)
+   * are swallowed so monitoring never affects the plugin's operation.
+   */
+  private persistHealthFile(): void {
+    void this.flushHealthFile();
+  }
+
+  private async flushHealthFile(): Promise<void> {
+    const storagePath = this.healthStoragePath();
+    if (!storagePath) {
+      return;
+    }
+    try {
+      const now = Date.now();
+      const health = await this.getHealth({ now });
+      writeHealthFileAtomic(storagePath, toPersistedHealth(health, now, this.healthCompat()));
+    } catch (error) {
+      this.debugLog(`Could not write health file: ${error instanceof Error ? error.message : 'unknown error'}`);
     }
   }
 

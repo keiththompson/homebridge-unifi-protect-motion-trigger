@@ -2,7 +2,14 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_MOTION_DURATION, PLATFORM_NAME, PLUGIN_NAME, PLUGIN_VERSION } from './settings.js';
+import {
+  DEFAULT_MOTION_DURATION,
+  HEALTH_FILENAME,
+  HEALTH_WRITE_INTERVAL_MS,
+  PLATFORM_NAME,
+  PLUGIN_NAME,
+  PLUGIN_VERSION,
+} from './settings.js';
 
 describe('settings', () => {
   it('should export correct plugin name', () => {
@@ -20,6 +27,12 @@ describe('settings', () => {
   it('matches package.json so health reports the published version', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
     expect(PLUGIN_VERSION).toBe(pkg.version);
-    expect(PLUGIN_VERSION).toBe('1.0.10');
+    expect(PLUGIN_VERSION).toBe('1.0.11');
+  });
+
+  it('names the health file home-monitor reads and refreshes inside its stale window', () => {
+    expect(HEALTH_FILENAME).toBe('.unifi-protect-motion-trigger-health.json');
+    expect(HEALTH_WRITE_INTERVAL_MS).toBe(60_000);
+    expect(HEALTH_WRITE_INTERVAL_MS).toBeLessThan(300_000);
   });
 });
