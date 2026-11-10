@@ -1,5 +1,12 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { buildHealthReport } from '../health.js';
+import { SMART_DETECT_SNAPSHOT_FILENAME } from '../settings.js';
+import { SmartDetectSnapshotStore } from '../smart-detect-store.js';
 import { createMockLogger } from '../test/mocks.js';
 import { ProtectClient } from './client.js';
 import type { ProtectCamera, SmartDetectPreferences } from './types.js';
@@ -15,6 +22,8 @@ interface CameraStore {
   recordingSettings: { enableMotionDetection: boolean; mode: string };
   motionSettings: null | { isEnabled?: boolean };
   smartDetectSettings: SmartDetectPreferences;
+  smartDetectZones?: Record<string, unknown>[];
+  secondLensSmartDetectZones?: Record<string, unknown>[];
 }
 
 const apiState = vi.hoisted(() => ({
@@ -83,6 +92,12 @@ function applyPatch(target: CameraStore, payload: Record<string, unknown>): void
   const smart = payload.smartDetectSettings as Partial<SmartDetectPreferences> | undefined;
   if (smart) {
     target.smartDetectSettings = { ...target.smartDetectSettings, ...smart };
+  }
+  if (Array.isArray(payload.smartDetectZones)) {
+    target.smartDetectZones = payload.smartDetectZones as Record<string, unknown>[];
+  }
+  if (Array.isArray(payload.secondLensSmartDetectZones)) {
+    target.secondLensSmartDetectZones = payload.secondLensSmartDetectZones as Record<string, unknown>[];
   }
 }
 
@@ -193,7 +208,7 @@ describe('ProtectClient device writes', () => {
     expect(apiState.updateDevice.mock.calls[0]?.[1]).not.toHaveProperty('motionSettings');
   });
 
-  it('keeps smart detection types the controller gained while motion was off', async () => {
+  it('restores the saved smart detection snapshot instead of types gained while shields were down', async () => {
     store.recordingSettings.enableMotionDetection = false;
     store.smartDetectSettings = {
       objectTypes: ['animal'],
@@ -209,13 +224,19 @@ describe('ProtectClient device writes', () => {
     });
 
     expect(outcome.result).toBe('ok');
-    expect(store.smartDetectSettings.objectTypes).toEqual(['animal']);
-    expect(store.smartDetectSettings.audioTypes).toEqual(['bark']);
+    expect(store.smartDetectSettings).toEqual({
+      objectTypes: ['person'],
+      audioTypes: ['bark'],
+      autoTrackingObjectTypes: [],
+    });
     const payload = apiState.updateDevice.mock.calls[0]?.[1] as {
       smartDetectSettings?: SmartDetectPreferences;
     };
-    expect(payload.smartDetectSettings?.objectTypes).toBeUndefined();
-    expect(payload.smartDetectSettings?.audioTypes).toEqual(['bark']);
+    expect(payload.smartDetectSettings).toEqual({
+      objectTypes: ['person'],
+      audioTypes: ['bark'],
+      autoTrackingObjectTypes: [],
+    });
   });
 
   it('retries readback on a bounded schedule and then confirms the later camera record', async () => {
@@ -378,5 +399,316 @@ describe('ProtectClient device writes', () => {
     expect(snapshot.error).toBe('controller timeout');
     expect(snapshot.createMotionEvents).toBeNull();
     expect(client.getCameraSnapshot('cam1')?.ok).toBe(false);
+  });
+});
+
+function zone(name: string, sensitivity: number, objectTypes: string[], points: number[][]): Record<string, unknown> {
+  return {
+    id: name === 'Street' ? 7 : 3,
+    name,
+    color: '#123456',
+    points,
+    sensitivity,
+    objectTypes: [...objectTypes],
+  };
+}
+
+function zonedCamera(
+  id: string,
+  name: string,
+  zoneName: string,
+  sensitivity: number,
+  objectTypes: string[],
+  points: number[][],
+): CameraStore {
+  return cameraRecord({
+    id,
+    name,
+    smartDetectSettings: {
+      objectTypes: [...objectTypes],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+    },
+    smartDetectZones: [zone(zoneName, sensitivity, objectTypes, points)],
+  });
+}
+
+describe('smart detection snapshots', () => {
+  it('disables every camera, restores each zone after a restart, and does not save the disabled config', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-smart-'));
+    const file = join(dir, SMART_DETECT_SNAPSHOT_FILENAME);
+    const driveway = zonedCamera(
+      'driveway',
+      'Driveway',
+      'Street',
+      75,
+      ['person'],
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+      ],
+    );
+    const yard = zonedCamera(
+      'yard',
+      'Backyard',
+      'Yard',
+      50,
+      ['person', 'vehicle'],
+      [
+        [0.2, 0.2],
+        [0.8, 0.2],
+        [0.8, 0.8],
+      ],
+    );
+    const cameras = new Map<string, CameraStore>([
+      ['driveway', driveway],
+      ['yard', yard],
+    ]);
+    apiState.updateDevice = vi.fn(async (camera: { id: string }, payload: Record<string, unknown>) => {
+      const target = cameras.get(camera.id);
+      if (!target) {
+        return null;
+      }
+      applyPatch(target, payload);
+      return structuredClone(target);
+    });
+    apiState.retrieve = vi.fn(async (url: string) => {
+      const id = url.split('/').pop() ?? '';
+      const target = cameras.get(id);
+      return target ? jsonResponse(structuredClone(target)) : null;
+    });
+
+    const store = new SmartDetectSnapshotStore(() => dir);
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: store,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const disabledDriveway = await client.updateCameraMotionDetection(
+      { id: 'driveway', name: 'Driveway' } as ProtectCamera,
+      false,
+    );
+    const disabledYard = await client.updateCameraMotionDetection(
+      { id: 'yard', name: 'Backyard' } as ProtectCamera,
+      false,
+    );
+
+    expect(disabledDriveway.result).toBe('ok');
+    expect(disabledYard.result).toBe('ok');
+    expect(driveway.recordingSettings.enableMotionDetection).toBe(false);
+    expect(yard.smartDetectZones?.[0]?.sensitivity).toBe(50);
+    expect(driveway.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(yard.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(driveway.smartDetectSettings.objectTypes).toEqual([]);
+    expect(yard.smartDetectSettings.objectTypes).toEqual([]);
+
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as {
+      cameras: Array<{ cameraId: string; config: { objectTypes: string[]; zones: Array<Record<string, unknown>> } }>;
+    };
+    const savedDriveway = saved.cameras.find((entry) => entry.cameraId === 'driveway');
+    const savedYard = saved.cameras.find((entry) => entry.cameraId === 'yard');
+    expect(savedDriveway?.config.objectTypes).toEqual(['person']);
+    expect(savedDriveway?.config.zones[0]).toMatchObject({ name: 'Street', sensitivity: 75, objectTypes: ['person'] });
+    expect(savedYard?.config.zones[0]).toMatchObject({
+      name: 'Yard',
+      sensitivity: 50,
+      objectTypes: ['person', 'vehicle'],
+    });
+    expect(JSON.stringify(saved)).not.toContain('password');
+
+    const restarted = new SmartDetectSnapshotStore(() => dir);
+    const restartedClient = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: restarted,
+      controllerAddress: '10.0.0.5',
+    });
+    (restartedClient as unknown as { connected: boolean }).connected = true;
+    apiState.updateDevice.mockClear();
+
+    const stillDown = await restartedClient.updateCameraMotionDetection(
+      { id: 'driveway', name: 'Driveway' } as ProtectCamera,
+      false,
+    );
+    expect(stillDown.result).toBe('ok');
+    const afterDown = JSON.parse(readFileSync(file, 'utf8')) as typeof saved;
+    expect(afterDown.cameras.find((entry) => entry.cameraId === 'driveway')?.config.zones[0]).toMatchObject({
+      sensitivity: 75,
+      objectTypes: ['person'],
+    });
+
+    const upDriveway = await restartedClient.updateCameraMotionDetection(
+      { id: 'driveway', name: 'Driveway' } as ProtectCamera,
+      true,
+    );
+    const upYard = await restartedClient.updateCameraMotionDetection(
+      { id: 'yard', name: 'Backyard' } as ProtectCamera,
+      true,
+    );
+
+    expect(upDriveway.result).toBe('ok');
+    expect(upYard.result).toBe('ok');
+    const payloads = apiState.updateDevice.mock.calls.map((call) => call[1] as Record<string, unknown>);
+    const drivewayPayload = payloads.find((payload) => {
+      const zones = payload.smartDetectZones as Array<Record<string, unknown>> | undefined;
+      return zones?.[0]?.name === 'Street';
+    });
+    const yardPayload = payloads.find((payload) => {
+      const zones = payload.smartDetectZones as Array<Record<string, unknown>> | undefined;
+      return zones?.[0]?.name === 'Yard';
+    });
+    expect(drivewayPayload?.smartDetectZones).toEqual([
+      expect.objectContaining({
+        name: 'Street',
+        sensitivity: 75,
+        objectTypes: ['person'],
+        points: [
+          [0, 0],
+          [1, 0],
+          [1, 1],
+        ],
+      }),
+    ]);
+    expect(yardPayload?.smartDetectZones).toEqual([
+      expect.objectContaining({
+        name: 'Yard',
+        sensitivity: 50,
+        objectTypes: ['person', 'vehicle'],
+      }),
+    ]);
+    expect(driveway.smartDetectZones?.[0]?.objectTypes).toEqual(['person']);
+    expect(yard.smartDetectSettings.objectTypes).toEqual(['person', 'vehicle']);
+    expect(driveway.smartDetectZones?.[0]?.sensitivity).toBe(75);
+    expect(yard.smartDetectZones?.[0]?.sensitivity).toBe(50);
+  });
+
+  it('still changes motion on one camera when smart detection is rejected, and continues with the next camera', async () => {
+    const driveway = zonedCamera(
+      'driveway',
+      'Driveway',
+      'Street',
+      75,
+      ['person'],
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+      ],
+    );
+    const yard = zonedCamera(
+      'yard',
+      'Backyard',
+      'Yard',
+      50,
+      ['vehicle'],
+      [
+        [0.1, 0.1],
+        [0.4, 0.1],
+        [0.4, 0.4],
+      ],
+    );
+    const cameras = new Map<string, CameraStore>([
+      ['driveway', driveway],
+      ['yard', yard],
+    ]);
+    apiState.updateDevice = vi.fn(async (camera: { id: string }, payload: Record<string, unknown>) => {
+      if (camera.id === 'driveway' && payload.smartDetectZones) {
+        throw new Error('zone rejected');
+      }
+      const target = cameras.get(camera.id);
+      if (!target) {
+        return null;
+      }
+      applyPatch(target, payload);
+      return structuredClone(target);
+    });
+    apiState.retrieve = vi.fn(async (url: string) => {
+      const id = url.split('/').pop() ?? '';
+      const target = cameras.get(id);
+      return target ? jsonResponse(structuredClone(target)) : null;
+    });
+    const client = connectedClient();
+
+    const first = await client.updateCameraMotionDetection(
+      { id: 'driveway', name: 'Driveway' } as ProtectCamera,
+      false,
+    );
+    const second = await client.updateCameraMotionDetection({ id: 'yard', name: 'Backyard' } as ProtectCamera, false);
+
+    expect(first.result).toBe('ok');
+    expect(second.result).toBe('ok');
+    expect(driveway.recordingSettings.enableMotionDetection).toBe(false);
+    expect(driveway.smartDetectZones?.[0]?.objectTypes).toEqual(['person']);
+    expect(yard.recordingSettings.enableMotionDetection).toBe(false);
+    expect(yard.smartDetectZones?.[0]).toMatchObject({ sensitivity: 50, objectTypes: [] });
+    expect(yard.smartDetectSettings.objectTypes).toEqual([]);
+  });
+
+  it('records smart detection readback drift when zones stay enabled', async () => {
+    store = zonedCamera(
+      'cam1',
+      'Front Door',
+      'Porch',
+      75,
+      ['person', 'vehicle'],
+      [
+        [0, 0],
+        [0.5, 0],
+        [0.5, 0.5],
+      ],
+    );
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      if (store.smartDetectZones) {
+        store.smartDetectZones = store.smartDetectZones.map((entry) => ({
+          ...entry,
+          objectTypes: ['person', 'vehicle'],
+        }));
+      }
+      return structuredClone(store);
+    });
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    const client = connectedClient();
+
+    const outcome = await client.updateCameraMotionDetection(camera, false);
+
+    expect(outcome.result).toBe('ok');
+    expect(store.recordingSettings.enableMotionDetection).toBe(false);
+    const snapshot = client.getCameraSnapshot('cam1');
+    const health = buildHealthReport({
+      pluginVersion: '1.0.12',
+      generatedAt: 1_700_000_000_000,
+      controllers: [
+        {
+          address: '10.0.0.5',
+          connected: true,
+          throttled: false,
+          admin: true,
+          lastError: null,
+          cameras: [
+            {
+              id: 'cam1',
+              name: 'Front Door',
+              intendedMotionEnabled: false,
+              smartDetectPreferencesSaved: true,
+              smartDetectSnapshot: outcome.smartDetectConfig,
+              snapshot,
+            },
+          ],
+        },
+      ],
+    });
+    const cameraHealth = health.controllers[0]?.cameras[0];
+    expect(cameraHealth?.drift).toBe(true);
+    expect(cameraHealth?.smartDetectDrift).toBe(true);
+    expect(cameraHealth?.readback.status).toBe('mismatch');
+    expect(cameraHealth?.smartDetectExpected?.zones?.[0]).toMatchObject({
+      name: 'Porch',
+      sensitivity: 75,
+      objectTypes: [],
+    });
+    expect(cameraHealth?.smartDetectActual?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
   });
 });

@@ -2,13 +2,17 @@ import type { PlatformConfig } from 'homebridge';
 
 export const PLUGIN_NAME = 'homebridge-unifi-protect-motion-trigger';
 export const PLATFORM_NAME = 'UniFi Protect Motion Trigger';
-export const PLUGIN_VERSION = '1.0.11';
+export const PLUGIN_VERSION = '1.0.12';
 
 export const DEFAULT_MOTION_DURATION = 10; // seconds
 
 // Written into the Homebridge storage dir so an external monitor can read the
 // plugin's connection health without the Homebridge UI API (which needs auth).
 export const HEALTH_FILENAME = '.unifi-protect-motion-trigger-health.json';
+
+// Pre-disable smart-detection snapshots. Written before shields go down so a
+// restart can restore each camera's own zones and object types.
+export const SMART_DETECT_SNAPSHOT_FILENAME = '.unifi-protect-motion-trigger-smart-detect.json';
 
 // home-monitor treats a snapshot older than 300s as stale (HEALTH_STALE_SECS).
 // Refresh well inside that window so a live plugin is never reported as wedged.

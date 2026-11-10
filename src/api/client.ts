@@ -2,14 +2,23 @@ import type { Logging } from 'homebridge';
 import { ProtectApi } from 'unifi-protect';
 
 import { type CameraReadbackSnapshot, errorSnapshot, snapshotFromCamera } from '../health.js';
+import type { SmartDetectSnapshotStore } from '../smart-detect-store.js';
 import { ProtectApiError } from './errors.js';
 import {
   MOTION_READBACK_DELAYS_MS,
   type MotionReadbackExpectation,
   motionReadbackMatches,
+  type MotionWritePlan,
   planMotionWrite,
   readMotionDiagnostics,
 } from './motion-state.js';
+import {
+  configFromPreferences,
+  preferencesFromConfig,
+  readSmartDetectConfig,
+  type SmartDetectConfig,
+  smartDetectConfigActive,
+} from './smart-detect.js';
 import type {
   LedSettings,
   ProtectBootstrap,
@@ -46,6 +55,10 @@ export interface ProtectClientOptions {
   now?: () => number;
   /** Fired after a settings readback so the platform can persist health. */
   onHealthChange?: () => void;
+  /** Durable pre-disable smart-detection snapshots. Optional in tests. */
+  smartDetectStore?: SmartDetectSnapshotStore;
+  /** Used with the snapshot store. `connect` sets this from the controller address. */
+  controllerAddress?: string;
 }
 
 export class ProtectClient {
@@ -56,6 +69,8 @@ export class ProtectClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly onHealthChange?: () => void;
+  private readonly smartDetectStore?: SmartDetectSnapshotStore;
+  private controllerAddress: string | undefined;
 
   // Serializes device writes so a burst (e.g. a HomeKit scene toggling every
   // camera at once) never fans out into dozens of concurrent API calls, which
@@ -70,6 +85,8 @@ export class ProtectClient {
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
     this.onHealthChange = options.onHealthChange;
+    this.smartDetectStore = options.smartDetectStore;
+    this.controllerAddress = options.controllerAddress;
   }
 
   private emitHealthChange(): void {
@@ -92,6 +109,7 @@ export class ProtectClient {
 
   public async connect(address: string, username: string, password: string): Promise<boolean> {
     try {
+      this.controllerAddress = address;
       this.log.info(`Connecting to UniFi Protect controller at ${address}...`);
 
       const loggedIn = await this.api.login(address, username, password);
@@ -185,7 +203,12 @@ export class ProtectClient {
    */
   public updateCameraSettings(
     camera: ProtectCamera,
-    settings: { led?: boolean; motion?: boolean; smartDetectPreferences?: SmartDetectPreferences | null },
+    settings: {
+      led?: boolean;
+      motion?: boolean;
+      smartDetectPreferences?: SmartDetectPreferences | null;
+      smartDetectConfig?: SmartDetectConfig | null;
+    },
   ): Promise<UpdateOutcome> {
     return this.updateDevice(camera, settings);
   }
@@ -221,7 +244,12 @@ export class ProtectClient {
    */
   private updateDevice(
     camera: ProtectCamera,
-    settings: { led?: boolean; motion?: boolean; smartDetectPreferences?: SmartDetectPreferences | null },
+    settings: {
+      led?: boolean;
+      motion?: boolean;
+      smartDetectPreferences?: SmartDetectPreferences | null;
+      smartDetectConfig?: SmartDetectConfig | null;
+    },
   ): Promise<UpdateOutcome> {
     const run = this.writeQueue.then(() => this.performUpdate(camera, settings));
     // Keep the chain alive regardless of individual outcomes.
@@ -234,7 +262,12 @@ export class ProtectClient {
 
   private async performUpdate(
     camera: ProtectCamera,
-    settings: { led?: boolean; motion?: boolean; smartDetectPreferences?: SmartDetectPreferences | null },
+    settings: {
+      led?: boolean;
+      motion?: boolean;
+      smartDetectPreferences?: SmartDetectPreferences | null;
+      smartDetectConfig?: SmartDetectConfig | null;
+    },
   ): Promise<UpdateOutcome> {
     const changes: string[] = [];
     if (settings.led !== undefined) {
@@ -243,20 +276,26 @@ export class ProtectClient {
     if (settings.motion !== undefined) {
       changes.push(`motion detection ${settings.motion ? 'enabled' : 'disabled'}`);
     }
-    if (changes.length === 0) {
-      return { result: 'ok', smartDetectPreferences: settings.smartDetectPreferences ?? null };
-    }
 
-    const keptPreferences = settings.smartDetectPreferences ?? null;
+    const keptConfig = this.resolveSavedSmartDetect(camera, settings);
+    const finish = (result: UpdateResult, config: SmartDetectConfig | null = keptConfig): UpdateOutcome => ({
+      result,
+      smartDetectPreferences: preferencesFromConfig(config),
+      smartDetectConfig: config,
+    });
+
+    if (changes.length === 0) {
+      return finish('ok');
+    }
     if (!this.connected) {
       this.log.error(`Cannot update ${camera.name}: not connected`);
-      return { result: 'failed', smartDetectPreferences: keptPreferences };
+      return finish('failed');
     }
     if (this.api.isThrottled) {
-      return { result: 'throttled', smartDetectPreferences: keptPreferences };
+      return finish('throttled');
     }
     if (!this.api.isAdminUser) {
-      return { result: 'unauthorized', smartDetectPreferences: keptPreferences };
+      return finish('unauthorized');
     }
 
     let liveCamera: ProtectCamera | null = null;
@@ -264,14 +303,36 @@ export class ProtectClient {
       liveCamera = await this.readCameraBeforeMotionChange(camera);
     }
 
-    const motionPlan =
-      settings.motion === undefined ? null : planMotionWrite(settings.motion, liveCamera, keptPreferences);
-    const preferences = motionPlan?.preferences ?? keptPreferences;
-    const payload: {
-      ledSettings?: LedSettings;
-      recordingSettings?: { enableMotionDetection: boolean };
-      smartDetectSettings?: Partial<SmartDetectPreferences>;
-    } = {};
+    let motionPlan: MotionWritePlan | null = null;
+    if (settings.motion !== undefined) {
+      try {
+        motionPlan = planMotionWrite(settings.motion, liveCamera, keptConfig);
+        if (settings.motion === false) {
+          // Snapshot first. A crash during the PATCH can still restore this config.
+          this.persistSmartDetectSnapshot(camera, motionPlan.config);
+        }
+      } catch (error) {
+        this.log.error(
+          `Smart detection update for ${camera.name} could not be prepared (${errorText(error)}). ` +
+            `Motion detection will still be changed.`,
+        );
+        motionPlan = {
+          payload: { recordingSettings: { enableMotionDetection: settings.motion } },
+          preferences: preferencesFromConfig(keptConfig),
+          config: keptConfig,
+          expectedSmartDetect: null,
+          expectedConfig: null,
+        };
+      }
+    }
+
+    const config = motionPlan?.config ?? keptConfig;
+    const preferences = motionPlan?.preferences ?? preferencesFromConfig(config);
+    if (motionPlan?.expectedConfig) {
+      changes.push(settings.motion ? 'smart detection restored' : 'smart detection disabled');
+    }
+
+    const payload: CameraWritePayload = {};
     if (settings.led !== undefined) {
       payload.ledSettings = { isEnabled: settings.led };
     }
@@ -280,10 +341,17 @@ export class ProtectClient {
       if (motionPlan.payload.smartDetectSettings) {
         payload.smartDetectSettings = motionPlan.payload.smartDetectSettings;
       }
+      if (motionPlan.payload.smartDetectZones) {
+        payload.smartDetectZones = motionPlan.payload.smartDetectZones;
+      }
+      if (motionPlan.payload.secondLensSmartDetectZones) {
+        payload.secondLensSmartDetectZones = motionPlan.payload.secondLensSmartDetectZones;
+      }
     }
 
     const expected: MotionReadbackExpectation = {
       smartDetect: motionPlan?.expectedSmartDetect ?? null,
+      smartDetectConfig: motionPlan?.expectedConfig ?? null,
     };
     if (settings.led !== undefined) {
       expected.led = settings.led;
@@ -292,39 +360,68 @@ export class ProtectClient {
       expected.createMotionEvents = settings.motion;
     }
 
+    const done = (result: UpdateResult): UpdateOutcome => ({
+      result,
+      smartDetectPreferences: preferences,
+      smartDetectConfig: config,
+    });
+
     try {
-      try {
-        const result = await this.api.updateDevice(camera as never, payload as never);
-        if (!result) {
-          const resultName: UpdateResult = this.api.isThrottled ? 'throttled' : 'failed';
+      const wrote = await this.writeDevice(camera, payload);
+      if (!wrote.ok && wrote.result === 'failed' && payloadHasSmartDetect(payload)) {
+        this.log.error(
+          `Smart detection update failed for ${camera.name} (${wrote.error}). ` +
+            `Motion detection will still be updated.`,
+        );
+        const retried = await this.writeDevice(camera, withoutSmartDetect(payload));
+        if (!retried.ok) {
           await this.refreshCamera(camera);
-          return { result: resultName, smartDetectPreferences: preferences };
+          return done(retried.result);
         }
-      } catch (error) {
-        this.log.error(`Error updating ${camera.name}:`, errorText(error));
+        expected.smartDetect = null;
+        expected.smartDetectConfig = null;
+      } else if (!wrote.ok) {
+        if (wrote.result === 'failed') {
+          this.log.error(`Error updating ${camera.name}: ${wrote.error}`);
+        }
         await this.refreshCamera(camera);
-        return { result: 'failed', smartDetectPreferences: preferences };
+        return done(wrote.result);
       }
 
       const readback = await this.readUntilMatch(camera, expected);
       if (readback.camera) {
         this.snapshots.set(camera.id, snapshotFromCamera(readback.camera, this.now(), readback.attempts));
-        const controlsMatch = motionReadbackMatches(readback.camera, { ...expected, smartDetect: null });
+        const controlsMatch = motionReadbackMatches(readback.camera, {
+          ...expected,
+          smartDetect: null,
+          smartDetectConfig: null,
+        });
+        const smartAsserted = Boolean(expected.smartDetectConfig || expected.smartDetect);
         const smartMatch =
-          !expected.smartDetect || motionReadbackMatches(readback.camera, { smartDetect: expected.smartDetect });
+          !smartAsserted ||
+          motionReadbackMatches(readback.camera, {
+            smartDetect: expected.smartDetect,
+            smartDetectConfig: expected.smartDetectConfig,
+          });
         if (controlsMatch && smartMatch) {
+          if (settings.motion === true) {
+            const confirmed = readSmartDetectConfig(readback.camera);
+            if (smartDetectConfigActive(confirmed)) {
+              this.persistSmartDetectSnapshot(camera, confirmed);
+            }
+          }
           this.log.info(`${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`);
-          return { result: 'ok', smartDetectPreferences: preferences };
+          return done('ok');
         }
         if (controlsMatch && !smartMatch) {
           this.log.error(
             `Create Motion Events for ${camera.name} matched the camera readback, but smart detection ` +
-              `types did not. Saved preferences were kept. The PATCH response was not the source of success.`,
+              `did not. The saved snapshot was kept. The PATCH response was not the source of success.`,
           );
-          return { result: 'ok', smartDetectPreferences: preferences };
+          return done('ok');
         }
         this.logReadbackMismatch(camera, expected, readback.camera);
-        return { result: 'mismatch', smartDetectPreferences: preferences };
+        return done('mismatch');
       }
 
       this.snapshots.set(
@@ -336,9 +433,56 @@ export class ProtectClient {
           (readback.error ? ` (${readback.error})` : '') +
           `. The PATCH response was not treated as success.`,
       );
-      return { result: 'failed', smartDetectPreferences: preferences };
+      return done('failed');
     } finally {
       this.emitHealthChange();
+    }
+  }
+
+  private resolveSavedSmartDetect(
+    camera: ProtectCamera,
+    settings: { smartDetectPreferences?: SmartDetectPreferences | null; smartDetectConfig?: SmartDetectConfig | null },
+  ): SmartDetectConfig | null {
+    if (this.smartDetectStore && this.controllerAddress) {
+      const stored = this.smartDetectStore.get(this.controllerAddress, camera.id);
+      if (stored) {
+        return stored;
+      }
+    }
+    if (settings.smartDetectConfig && smartDetectConfigActive(settings.smartDetectConfig)) {
+      return settings.smartDetectConfig;
+    }
+    const fromPreferences = configFromPreferences(settings.smartDetectPreferences);
+    return fromPreferences && smartDetectConfigActive(fromPreferences) ? fromPreferences : null;
+  }
+
+  private persistSmartDetectSnapshot(camera: ProtectCamera, config: SmartDetectConfig | null): void {
+    if (!this.smartDetectStore || !this.controllerAddress) {
+      return;
+    }
+    try {
+      this.smartDetectStore.remember(this.controllerAddress, camera.id, camera.name, config);
+    } catch (error) {
+      this.log.error(`Could not save the smart detection snapshot for ${camera.name}: ${errorText(error)}`);
+    }
+  }
+
+  private async writeDevice(
+    camera: ProtectCamera,
+    payload: CameraWritePayload,
+  ): Promise<{ ok: true } | { ok: false; result: UpdateResult; error: string }> {
+    try {
+      const result = await this.api.updateDevice(camera as never, payload as never);
+      if (!result) {
+        return {
+          ok: false,
+          result: this.api.isThrottled ? 'throttled' : 'failed',
+          error: 'controller rejected the update',
+        };
+      }
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, result: 'failed', error: errorText(error) };
     }
   }
 
@@ -427,14 +571,12 @@ export class ProtectClient {
 
   private logReadbackMismatch(camera: ProtectCamera, expected: MotionReadbackExpectation, actual: ProtectCamera): void {
     const diagnostics = readMotionDiagnostics(actual);
-    const actualTypes = diagnostics.smartDetect
-      ? `object=${diagnostics.smartDetect.objectTypes.join('|') || 'none'}, ` +
-        `audio=${diagnostics.smartDetect.audioTypes.join('|') || 'none'}`
-      : 'unavailable';
-    const expectedTypes = expected.smartDetect
-      ? `object=${expected.smartDetect.objectTypes.join('|') || 'none'}, ` +
-        `audio=${expected.smartDetect.audioTypes.join('|') || 'none'}`
-      : 'not asserted';
+    const actualTypes = describeSmartDetect(diagnostics.smartDetectConfig);
+    const expectedTypes = expected.smartDetectConfig
+      ? describeSmartDetect(expected.smartDetectConfig)
+      : expected.smartDetect
+        ? `object=${expected.smartDetect.objectTypes.join('|') || 'none'}`
+        : 'not asserted';
 
     this.log.error(
       `Readback mismatch for ${camera.name}: requested Create Motion Events ` +
@@ -454,6 +596,35 @@ export class ProtectClient {
       }
     }
   }
+}
+
+interface CameraWritePayload {
+  ledSettings?: LedSettings;
+  recordingSettings?: { enableMotionDetection: boolean };
+  smartDetectSettings?: SmartDetectPreferences;
+  smartDetectZones?: Record<string, unknown>[];
+  secondLensSmartDetectZones?: Record<string, unknown>[];
+}
+
+function payloadHasSmartDetect(payload: CameraWritePayload): boolean {
+  return Boolean(payload.smartDetectSettings || payload.smartDetectZones || payload.secondLensSmartDetectZones);
+}
+
+function withoutSmartDetect(payload: CameraWritePayload): CameraWritePayload {
+  return {
+    ...(payload.ledSettings ? { ledSettings: payload.ledSettings } : {}),
+    ...(payload.recordingSettings ? { recordingSettings: payload.recordingSettings } : {}),
+  };
+}
+
+function describeSmartDetect(config: SmartDetectConfig | null | undefined): string {
+  if (!config) {
+    return 'unavailable';
+  }
+  const zones = (config.zones ?? [])
+    .map((zone) => `${zone.name || 'zone'}:${zone.sensitivity ?? '?'}:${zone.objectTypes.join('+') || 'none'}`)
+    .join(',');
+  return `object=${config.objectTypes.join('|') || 'none'}, zones=${zones || 'none'}`;
 }
 
 function defaultSleep(ms: number): Promise<void> {

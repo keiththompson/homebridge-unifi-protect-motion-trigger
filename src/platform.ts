@@ -2,7 +2,7 @@ import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformCo
 
 import { ProtectClient } from './api/client.js';
 import { ProtectApiError } from './api/errors.js';
-import { smartDetectPreferencesSaved } from './api/motion-state.js';
+import { smartDetectConfigActive } from './api/smart-detect.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
 import type { HealthControllerInput, PluginHealth } from './health.js';
@@ -15,6 +15,7 @@ import {
   PLUGIN_NAME,
   PLUGIN_VERSION,
 } from './settings.js';
+import { SmartDetectSnapshotStore } from './smart-detect-store.js';
 
 interface ControllerSession {
   client: ProtectClient;
@@ -34,6 +35,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   private readonly motionDuration: number;
   private readonly debug: boolean;
   private healthWriter: ReturnType<typeof setInterval> | null = null;
+  private readonly smartDetectStore = new SmartDetectSnapshotStore(() => this.healthStoragePath());
 
   public get Service(): typeof this.api.hap.Service {
     return this.api.hap.Service;
@@ -98,7 +100,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
         throttled: session.connected ? session.client.isThrottled : false,
         admin: session.connected ? session.client.isAdminUser : null,
         lastError: session.lastError,
-        cameras: session.connected ? this.healthCameras(session.client) : [],
+        cameras: session.connected ? this.healthCameras(address, session.client) : [],
       });
     }
 
@@ -150,6 +152,8 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       onHealthChange: () => {
         this.persistHealthFile();
       },
+      smartDetectStore: this.smartDetectStore,
+      controllerAddress: controller.address,
     });
 
     try {
@@ -226,14 +230,24 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     });
   }
 
-  private healthCameras(client: ProtectClient): HealthControllerInput['cameras'] {
+  private smartDetectSnapshot(
+    address: string,
+    cameraId: string,
+    accessory: CameraAccessory | undefined,
+  ): HealthControllerInput['cameras'][number]['smartDetectSnapshot'] {
+    return this.smartDetectStore.get(address, cameraId) ?? accessory?.savedSmartDetectConfig ?? null;
+  }
+
+  private healthCameras(address: string, client: ProtectClient): HealthControllerInput['cameras'] {
     return client.cameras.map((camera) => {
       const accessory = this.configuredAccessories.get(camera.id);
+      const smartDetectSnapshot = this.smartDetectSnapshot(address, camera.id, accessory);
       return {
         id: camera.id,
         name: camera.name,
         intendedMotionEnabled: accessory ? accessory.motionEnabledState : null,
-        smartDetectPreferencesSaved: smartDetectPreferencesSaved(accessory?.savedSmartDetectPreferences),
+        smartDetectPreferencesSaved: smartDetectConfigActive(smartDetectSnapshot),
+        smartDetectSnapshot,
         snapshot: client.getCameraSnapshot(camera.id),
       };
     });

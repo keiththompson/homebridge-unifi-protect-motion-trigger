@@ -41,7 +41,7 @@ function outcome(
   result: UpdateOutcome['result'],
   preferences: UpdateOutcome['smartDetectPreferences'] = null,
 ): UpdateOutcome {
-  return { result, smartDetectPreferences: preferences };
+  return { result, smartDetectPreferences: preferences, smartDetectConfig: null };
 }
 
 function motionSwitch(accessory: PlatformAccessory): Characteristic & {

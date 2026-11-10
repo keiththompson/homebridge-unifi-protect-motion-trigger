@@ -1,3 +1,5 @@
+import type { SmartDetectConfig } from './smart-detect.js';
+
 export interface SmartDetectPreferences {
   objectTypes: string[];
   audioTypes: string[];
@@ -39,6 +41,13 @@ export interface ProtectCamera {
     sensitivity?: number;
   } | null;
   smartDetectSettings?: SmartDetectSettings | null;
+  /**
+   * Per-zone smart detection. There is no enable flag; a zone detects when
+   * `objectTypes` is non-empty. Absent means this read did not include the field.
+   */
+  smartDetectZones?: unknown[] | null;
+  /** Zones for the second lens on dual-lens cameras. Same shape as `smartDetectZones`. */
+  secondLensSmartDetectZones?: unknown[] | null;
 }
 
 export interface ProtectBootstrap {
@@ -73,6 +82,11 @@ export type UpdateResult = 'ok' | 'mismatch' | 'throttled' | 'unauthorized' | 'f
 
 export interface UpdateOutcome {
   result: UpdateResult;
-  /** Smart-detection types to persist for a later re-enable. Null when there is nothing to restore. */
+  /** Smart-detection type lists to persist for a later re-enable. Null when there is nothing to restore. */
   smartDetectPreferences: SmartDetectPreferences | null;
+  /**
+   * Full pre-disable snapshot, including zones. Null when there is nothing to restore.
+   * Inactive (already disabled) configs are not returned here.
+   */
+  smartDetectConfig: SmartDetectConfig | null;
 }

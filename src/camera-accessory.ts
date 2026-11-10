@@ -2,6 +2,7 @@ import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge
 
 import type { ProtectClient } from './api/client.js';
 import { observeSmartDetectPreferences } from './api/motion-state.js';
+import { sanitizeSmartDetectConfig, type SmartDetectConfig } from './api/smart-detect.js';
 import type {
   LedSettings,
   ProtectCamera,
@@ -81,6 +82,10 @@ export class CameraAccessory {
     return this.smartDetectPreferences;
   }
 
+  public get savedSmartDetectConfig(): SmartDetectConfig | null {
+    return this.smartDetectConfig;
+  }
+
   private get smartDetectPreferences(): SmartDetectPreferences | null {
     const stored = this.accessory.context.smartDetectPreferences as SmartDetectPreferences | undefined;
     if (!stored) {
@@ -91,6 +96,14 @@ export class CameraAccessory {
 
   private set smartDetectPreferences(value: SmartDetectPreferences | null) {
     this.accessory.context.smartDetectPreferences = value;
+  }
+
+  private get smartDetectConfig(): SmartDetectConfig | null {
+    return sanitizeSmartDetectConfig(this.accessory.context.smartDetectConfig);
+  }
+
+  private set smartDetectConfig(value: SmartDetectConfig | null) {
+    this.accessory.context.smartDetectConfig = value;
   }
 
   private configureAccessoryInformation(camera: ProtectCamera): void {
@@ -213,7 +226,11 @@ export class CameraAccessory {
       const outcome = await this.client.updateCameraSettings(this.camera, {
         ...settings,
         smartDetectPreferences: settings.motion !== undefined ? this.smartDetectPreferences : undefined,
+        smartDetectConfig: settings.motion !== undefined ? this.smartDetectConfig : undefined,
       });
+      if (settings.motion !== undefined && outcome.smartDetectConfig) {
+        this.smartDetectConfig = outcome.smartDetectConfig;
+      }
       if (settings.motion !== undefined && outcome.smartDetectPreferences) {
         this.smartDetectPreferences = outcome.smartDetectPreferences;
       }
