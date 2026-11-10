@@ -76,11 +76,14 @@ export function createMockAccessory(displayName: string, uuid: string): Platform
   return mock as unknown as PlatformAccessory;
 }
 
-export function createMockAPI(): API {
+export function createMockAPI(options: { storagePath?: string } = {}): API {
   const accessories: PlatformAccessory[] = [];
   const eventHandlers = new Map<string, ((...args: unknown[]) => void)[]>();
 
   const mock = {
+    user: {
+      storagePath: () => options.storagePath ?? '',
+    },
     hap: {
       Service: {
         AccessoryInformation: 'AccessoryInformation',

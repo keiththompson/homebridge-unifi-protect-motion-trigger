@@ -44,6 +44,8 @@ export interface ProtectClientOptions {
   /** Test hook. Production waits with a timer. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** Fired after a settings readback so the platform can persist health. */
+  onHealthChange?: () => void;
 }
 
 export class ProtectClient {
@@ -53,6 +55,7 @@ export class ProtectClient {
   private readonly snapshots = new Map<string, CameraReadbackSnapshot>();
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly onHealthChange?: () => void;
 
   // Serializes device writes so a burst (e.g. a HomeKit scene toggling every
   // camera at once) never fans out into dozens of concurrent API calls, which
@@ -66,6 +69,15 @@ export class ProtectClient {
     this.api = new ProtectApi() as unknown as ProtectApiLike;
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
+    this.onHealthChange = options.onHealthChange;
+  }
+
+  private emitHealthChange(): void {
+    try {
+      this.onHealthChange?.();
+    } catch {
+      // Monitoring must never break a settings write.
+    }
   }
 
   /** True while the underlying API is pausing calls after repeated errors. */
@@ -281,49 +293,53 @@ export class ProtectClient {
     }
 
     try {
-      const result = await this.api.updateDevice(camera as never, payload as never);
-      if (!result) {
-        const resultName: UpdateResult = this.api.isThrottled ? 'throttled' : 'failed';
+      try {
+        const result = await this.api.updateDevice(camera as never, payload as never);
+        if (!result) {
+          const resultName: UpdateResult = this.api.isThrottled ? 'throttled' : 'failed';
+          await this.refreshCamera(camera);
+          return { result: resultName, smartDetectPreferences: preferences };
+        }
+      } catch (error) {
+        this.log.error(`Error updating ${camera.name}:`, errorText(error));
         await this.refreshCamera(camera);
-        return { result: resultName, smartDetectPreferences: preferences };
+        return { result: 'failed', smartDetectPreferences: preferences };
       }
-    } catch (error) {
-      this.log.error(`Error updating ${camera.name}:`, errorText(error));
-      await this.refreshCamera(camera);
+
+      const readback = await this.readUntilMatch(camera, expected);
+      if (readback.camera) {
+        this.snapshots.set(camera.id, snapshotFromCamera(readback.camera, this.now(), readback.attempts));
+        const controlsMatch = motionReadbackMatches(readback.camera, { ...expected, smartDetect: null });
+        const smartMatch =
+          !expected.smartDetect || motionReadbackMatches(readback.camera, { smartDetect: expected.smartDetect });
+        if (controlsMatch && smartMatch) {
+          this.log.info(`${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`);
+          return { result: 'ok', smartDetectPreferences: preferences };
+        }
+        if (controlsMatch && !smartMatch) {
+          this.log.error(
+            `Create Motion Events for ${camera.name} matched the camera readback, but smart detection ` +
+              `types did not. Saved preferences were kept. The PATCH response was not the source of success.`,
+          );
+          return { result: 'ok', smartDetectPreferences: preferences };
+        }
+        this.logReadbackMismatch(camera, expected, readback.camera);
+        return { result: 'mismatch', smartDetectPreferences: preferences };
+      }
+
+      this.snapshots.set(
+        camera.id,
+        errorSnapshot(readback.error ?? `Unable to read ${camera.name} after update`, readback.attempts),
+      );
+      this.log.error(
+        `Unable to confirm settings for ${camera.name}: camera readback failed` +
+          (readback.error ? ` (${readback.error})` : '') +
+          `. The PATCH response was not treated as success.`,
+      );
       return { result: 'failed', smartDetectPreferences: preferences };
+    } finally {
+      this.emitHealthChange();
     }
-
-    const readback = await this.readUntilMatch(camera, expected);
-    if (readback.camera) {
-      this.snapshots.set(camera.id, snapshotFromCamera(readback.camera, this.now(), readback.attempts));
-      const controlsMatch = motionReadbackMatches(readback.camera, { ...expected, smartDetect: null });
-      const smartMatch =
-        !expected.smartDetect || motionReadbackMatches(readback.camera, { smartDetect: expected.smartDetect });
-      if (controlsMatch && smartMatch) {
-        this.log.info(`${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`);
-        return { result: 'ok', smartDetectPreferences: preferences };
-      }
-      if (controlsMatch && !smartMatch) {
-        this.log.error(
-          `Create Motion Events for ${camera.name} matched the camera readback, but smart detection ` +
-            `types did not. Saved preferences were kept. The PATCH response was not the source of success.`,
-        );
-        return { result: 'ok', smartDetectPreferences: preferences };
-      }
-      this.logReadbackMismatch(camera, expected, readback.camera);
-      return { result: 'mismatch', smartDetectPreferences: preferences };
-    }
-
-    this.snapshots.set(
-      camera.id,
-      errorSnapshot(readback.error ?? `Unable to read ${camera.name} after update`, readback.attempts),
-    );
-    this.log.error(
-      `Unable to confirm settings for ${camera.name}: camera readback failed` +
-        (readback.error ? ` (${readback.error})` : '') +
-        `. The PATCH response was not treated as success.`,
-    );
-    return { result: 'failed', smartDetectPreferences: preferences };
   }
 
   public disconnect(): void {
