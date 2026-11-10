@@ -29,6 +29,7 @@ function report(
   snapshot: ReturnType<typeof snapshotFromCamera> | ReturnType<typeof errorSnapshot> | null,
   intended: boolean | null,
   generatedAt = now,
+  intendedSmartDetect: boolean | null = null,
 ): ReturnType<typeof buildHealthReport> {
   return buildHealthReport({
     pluginVersion: '1.1.0',
@@ -46,6 +47,8 @@ function report(
             name: 'Front Door',
             intendedMotionEnabled: intended,
             smartDetectPreferencesSaved: false,
+            intendedSmartDetect,
+            smartDetectSnapshot: null,
             snapshot,
           },
         ],
@@ -55,11 +58,11 @@ function report(
 }
 
 describe('health report', () => {
-  it('uses schema 1.1.0 and reports unknown before any camera read', () => {
+  it('uses schema 1.2.0 and reports unknown before any camera read', () => {
     const health = report(null, null);
 
     expect(health.schemaVersion).toBe(HEALTH_SCHEMA_VERSION);
-    expect(health.schemaVersion).toBe('1.1.0');
+    expect(health.schemaVersion).toBe('1.2.0');
     const cameraHealth = health.controllers[0]?.cameras[0];
     expect(cameraHealth?.readback.status).toBe('unknown');
     expect(cameraHealth?.createMotionEvents).toBeNull();
@@ -88,16 +91,66 @@ describe('health report', () => {
     expect(cameraHealth?.readback.attempts).toBe(2);
   });
 
-  it('reports drift when motion events are off but smart detections are still configured', () => {
+  it('does not treat active smart detection as motion drift', () => {
     const disabled = {
       ...camera,
       recordingSettings: { enableMotionDetection: false },
     } as unknown as ProtectCamera;
     const health = report(snapshotFromCamera(disabled, now, 1), false);
 
-    expect(health.controllers[0]?.cameras[0]?.readback.status).toBe('mismatch');
-    expect(health.controllers[0]?.cameras[0]?.drift).toBe(true);
+    expect(health.controllers[0]?.cameras[0]?.readback.status).toBe('verified');
+    expect(health.controllers[0]?.cameras[0]?.drift).toBe(false);
+    expect(health.controllers[0]?.cameras[0]?.smartDetectDrift).toBeNull();
     expect(health.controllers[0]?.cameras[0]?.smartDetectObjectTypes).toEqual(['person']);
+  });
+
+  it('reports smart detection drift when that switch is off but object types remain', () => {
+    const health = report(snapshotFromCamera(camera, now, 1), true, now, false);
+    const cameraHealth = health.controllers[0]?.cameras[0];
+
+    expect(cameraHealth?.readback.status).toBe('mismatch');
+    expect(cameraHealth?.drift).toBe(true);
+    expect(cameraHealth?.smartDetectDrift).toBe(true);
+    expect(cameraHealth?.smartDetectExpected?.objectTypes).toEqual([]);
+    expect(cameraHealth?.smartDetectActual?.objectTypes).toEqual(['person']);
+  });
+
+  it('reports zone drift separately from a cleared settings list', () => {
+    const disabled = {
+      ...camera,
+      recordingSettings: { enableMotionDetection: false },
+      smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
+      smartDetectZones: [
+        {
+          id: 4,
+          name: 'Street',
+          points: [
+            [0, 0],
+            [1, 0],
+            [1, 1],
+          ],
+          sensitivity: 75,
+          objectTypes: ['person', 'vehicle'],
+        },
+      ],
+    } as unknown as ProtectCamera;
+    const health = report(snapshotFromCamera(disabled, now, 2), false, now, false);
+    const cameraHealth = health.controllers[0]?.cameras[0];
+
+    expect(cameraHealth?.smartDetectObjectTypes).toEqual([]);
+    expect(cameraHealth?.smartDetectDrift).toBe(true);
+    expect(cameraHealth?.drift).toBe(true);
+    expect(cameraHealth?.readback.status).toBe('mismatch');
+    expect(cameraHealth?.smartDetectExpected?.zones?.[0]).toMatchObject({
+      name: 'Street',
+      sensitivity: 75,
+      objectTypes: [],
+    });
+    expect(cameraHealth?.smartDetectActual?.zones?.[0]).toMatchObject({
+      name: 'Street',
+      sensitivity: 75,
+      objectTypes: ['person', 'vehicle'],
+    });
   });
 
   it('marks an old successful read stale without turning it into a fresh verification', () => {
@@ -131,7 +184,7 @@ describe('health report', () => {
 });
 
 describe('persisted health file', () => {
-  it('keeps home-monitor keys and stores schema 1.1.0 details beside the camera count', () => {
+  it('keeps home-monitor keys and stores schema 1.2.0 details beside the camera count', () => {
     const health = report(snapshotFromCamera(camera, now, 1), true);
     const persisted = toPersistedHealth(health, now, {
       '10.0.0.5': {
@@ -142,7 +195,7 @@ describe('persisted health file', () => {
       },
     });
 
-    expect(persisted.schemaVersion).toBe('1.1.0');
+    expect(persisted.schemaVersion).toBe('1.2.0');
     expect(persisted.pluginVersion).toBe('1.1.0');
     expect(persisted.updatedAt).toBe('2026-11-08T07:37:00.000Z');
     expect(persisted.updatedAtEpoch).toBe(Math.floor(now / 1000));

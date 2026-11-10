@@ -57,6 +57,12 @@
         "type": "boolean",
         "default": false,
         "description": "Enable debug logging for troubleshooting"
+      },
+      "showSmartDetection": {
+        "title": "Show Smart Detection Switch",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a Smart Detection switch for each camera. Turn this off to hide that switch. The Motion Enabled switch is unchanged."
       }
     }
   },
@@ -79,7 +85,7 @@
       "title": "Advanced Settings",
       "expandable": true,
       "expanded": false,
-      "items": ["motionDuration", "debug"]
+      "items": ["motionDuration", "showSmartDetection", "debug"]
     }
   ]
 }

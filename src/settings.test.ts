@@ -9,6 +9,7 @@ import {
   PLATFORM_NAME,
   PLUGIN_NAME,
   PLUGIN_VERSION,
+  SMART_DETECT_SNAPSHOT_FILENAME,
 } from './settings.js';
 
 describe('settings', () => {
@@ -27,11 +28,12 @@ describe('settings', () => {
   it('matches package.json so health reports the published version', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
     expect(PLUGIN_VERSION).toBe(pkg.version);
-    expect(PLUGIN_VERSION).toBe('1.0.11');
+    expect(PLUGIN_VERSION).toBe('1.0.12');
   });
 
   it('names the health file home-monitor reads and refreshes inside its stale window', () => {
     expect(HEALTH_FILENAME).toBe('.unifi-protect-motion-trigger-health.json');
+    expect(SMART_DETECT_SNAPSHOT_FILENAME).toBe('.unifi-protect-motion-trigger-smart-detect.json');
     expect(HEALTH_WRITE_INTERVAL_MS).toBe(60_000);
     expect(HEALTH_WRITE_INTERVAL_MS).toBeLessThan(300_000);
   });

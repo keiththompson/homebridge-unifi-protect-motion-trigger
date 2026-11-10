@@ -2,15 +2,23 @@ import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { MotionDiagnostics } from './api/motion-state.js';
-import { motionDrift, readMotionDiagnostics } from './api/motion-state.js';
+import { motionDrift, readMotionDiagnostics, smartDetectDrift } from './api/motion-state.js';
+import {
+  cloneSmartDetectConfig,
+  disableSmartDetect,
+  type SmartDetectConfig,
+  smartDetectConfigActive,
+  type SmartDetectZoneSnapshot,
+} from './api/smart-detect.js';
 import type { ProtectCamera, SmartDetectPreferences } from './api/types.js';
 import { HEALTH_FILENAME } from './settings.js';
 
 /**
- * First health document published by this plugin.
- * Releases through 1.0.9 had no health payload, so 1.1.0 only adds fields.
+ * Health document.
+ * 1.1.0 added readback and drift. 1.2.0 adds smart-detection expected, actual,
+ * and drift on each camera. Older fields are unchanged.
  */
-export const HEALTH_SCHEMA_VERSION = '1.1.0' as const;
+export const HEALTH_SCHEMA_VERSION = '1.2.0' as const;
 
 /** A read older than this is stale. Callers can refresh before trusting it. */
 export const HEALTH_READBACK_STALE_MS = 5 * 60 * 1000;
@@ -26,6 +34,24 @@ export interface CameraReadbackSnapshot {
   motionSettingsKnown: boolean;
   motionSettings: null | { isEnabled: boolean | null };
   smartDetect: SmartDetectPreferences | null;
+  smartDetectConfig: SmartDetectConfig | null;
+}
+
+export interface SmartDetectHealthZone {
+  id: number | null;
+  name: string;
+  sensitivity: number | null;
+  objectTypes: string[];
+  points: number[][];
+}
+
+/** Smart detection as reported in the health file. Zone geometry is included; raw controller objects are not. */
+export interface SmartDetectHealthState {
+  objectTypes: string[];
+  audioTypes: string[];
+  autoTrackingObjectTypes: string[];
+  zones: SmartDetectHealthZone[] | null;
+  secondLensZones: SmartDetectHealthZone[] | null;
 }
 
 export interface CameraHealth {
@@ -39,9 +65,19 @@ export interface CameraHealth {
   motionSettingsKnown: boolean | null;
   motionSettings: null | { isEnabled: boolean | null };
   smartDetectPreferencesSaved: boolean;
+  /** Smart detection the switch should have produced, or null when that is not known. */
+  smartDetectExpected: SmartDetectHealthState | null;
+  /** Smart detection from the last successful camera read, or null. */
+  smartDetectActual: SmartDetectHealthState | null;
   /**
-   * True when the HomeKit switch and the last successful read disagree.
-   * Null when either side is unknown. Stale reads still report drift from that old read.
+   * True when expected and actual smart detection disagree.
+   * Null when either side is unknown. Independent of the motion-flag half of `drift`.
+   */
+  smartDetectDrift: boolean | null;
+  /**
+   * True when the HomeKit switch and the last successful read disagree,
+   * including smart detection. Null when the motion flag is unknown.
+   * Stale reads still report drift from that old read.
    */
   drift: boolean | null;
   readback: {
@@ -75,6 +111,10 @@ export interface HealthCameraInput {
   name: string;
   intendedMotionEnabled: boolean | null;
   smartDetectPreferencesSaved: boolean;
+  /** Smart Detection switch, or null when that switch is hidden or not loaded. */
+  intendedSmartDetect: boolean | null;
+  /** Active pre-disable snapshot, or null when this camera has nothing to restore. */
+  smartDetectSnapshot: SmartDetectConfig | null;
   snapshot: CameraReadbackSnapshot | null;
 }
 
@@ -102,6 +142,7 @@ export function errorSnapshot(message: string, attempts: number): CameraReadback
     motionSettingsKnown: false,
     motionSettings: null,
     smartDetect: null,
+    smartDetectConfig: null,
   };
 }
 
@@ -136,14 +177,16 @@ export function interpretCameraHealth(
 ): CameraHealth {
   const snapshot = camera.snapshot;
   const base = emptyCameraHealth(camera);
+  const smart = smartDetectFields(camera, snapshot);
 
   if (!snapshot) {
-    return base;
+    return { ...base, ...smart };
   }
 
   if (!snapshot.ok) {
     return {
       ...base,
+      ...smart,
       readback: {
         status: 'error',
         fetchedAt: null,
@@ -153,7 +196,7 @@ export function interpretCameraHealth(
     };
   }
 
-  const populated = thisCameraFromSnapshot(base, snapshot);
+  const populated = { ...thisCameraFromSnapshot(base, snapshot), ...smart };
   if (snapshot.createMotionEvents === null) {
     return {
       ...populated,
@@ -172,8 +215,11 @@ export function interpretCameraHealth(
     motionSettingsKnown: snapshot.motionSettingsKnown,
     motionSettings: snapshot.motionSettings,
     smartDetect: snapshot.smartDetect,
+    smartDetectConfig: snapshot.smartDetectConfig,
   };
-  const drift = motionDrift(camera.intendedMotionEnabled, diagnostics);
+  const motionDisagrees = motionDrift(camera.intendedMotionEnabled, diagnostics);
+  const smartDisagrees = smart.smartDetectDrift;
+  const drift = motionDisagrees === null ? null : motionDisagrees || smartDisagrees === true;
   const age = snapshot.fetchedAt === null ? Number.POSITIVE_INFINITY : now - snapshot.fetchedAt;
   const stale = age > staleAfterMs;
   let status: HealthReadbackStatus = 'verified';
@@ -227,7 +273,71 @@ function snapshotFromDiagnostics(
           autoTrackingObjectTypes: [...diagnostics.smartDetect.autoTrackingObjectTypes],
         }
       : null,
+    smartDetectConfig: diagnostics.smartDetectConfig ? cloneSmartDetectConfig(diagnostics.smartDetectConfig) : null,
   };
+}
+
+function smartDetectFields(
+  camera: HealthCameraInput,
+  snapshot: CameraReadbackSnapshot | null,
+): Pick<CameraHealth, 'smartDetectExpected' | 'smartDetectActual' | 'smartDetectDrift'> {
+  const actual = snapshot?.ok ? snapshot.smartDetectConfig : null;
+  const saved = camera.smartDetectSnapshot;
+  const expected = expectedSmartDetect(camera.intendedSmartDetect, saved, actual);
+  return {
+    smartDetectExpected: toSmartDetectHealthState(expected),
+    smartDetectActual: toSmartDetectHealthState(actual),
+    smartDetectDrift: smartDetectDrift(camera.intendedSmartDetect, actual, saved),
+  };
+}
+
+function expectedSmartDetect(
+  intended: boolean | null,
+  saved: SmartDetectConfig | null,
+  actual: SmartDetectConfig | null,
+): SmartDetectConfig | null {
+  if (intended === null) {
+    return null;
+  }
+  if (!intended) {
+    if (saved && smartDetectConfigActive(saved)) {
+      return disableSmartDetect(saved);
+    }
+    if (actual) {
+      return disableSmartDetect(actual);
+    }
+    return null;
+  }
+  if (saved && smartDetectConfigActive(saved)) {
+    return cloneSmartDetectConfig(saved);
+  }
+  return null;
+}
+
+export function toSmartDetectHealthState(config: SmartDetectConfig | null | undefined): SmartDetectHealthState | null {
+  if (!config) {
+    return null;
+  }
+  return {
+    objectTypes: [...config.objectTypes],
+    audioTypes: [...config.audioTypes],
+    autoTrackingObjectTypes: [...config.autoTrackingObjectTypes],
+    zones: toHealthZones(config.zones),
+    secondLensZones: toHealthZones(config.secondLensZones),
+  };
+}
+
+function toHealthZones(zones: SmartDetectZoneSnapshot[] | null): SmartDetectHealthZone[] | null {
+  if (zones === null) {
+    return null;
+  }
+  return zones.map((zone) => ({
+    id: zone.id,
+    name: zone.name,
+    sensitivity: zone.sensitivity,
+    objectTypes: [...zone.objectTypes],
+    points: zone.points ? zone.points.map((point) => [...point]) : [],
+  }));
 }
 
 function emptyCameraHealth(camera: HealthCameraInput): CameraHealth {
@@ -242,6 +352,9 @@ function emptyCameraHealth(camera: HealthCameraInput): CameraHealth {
     motionSettingsKnown: null,
     motionSettings: null,
     smartDetectPreferencesSaved: camera.smartDetectPreferencesSaved,
+    smartDetectExpected: null,
+    smartDetectActual: null,
+    smartDetectDrift: null,
     drift: null,
     readback: {
       status: 'unknown',
@@ -262,7 +375,7 @@ export interface HealthFileCompat {
 /**
  * On-disk document for home-monitor. `controllers[].cameras` stays a count because
  * home-monitor sums that field (`[.controllers[]?.cameras] | add`). Per-camera
- * schema 1.1.0 details live on `cameraHealth`.
+ * schema details live on `cameraHealth`.
  */
 export interface PersistedControllerHealth extends HealthFileCompat {
   address: string;
