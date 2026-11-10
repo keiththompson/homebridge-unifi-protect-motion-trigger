@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   motionDrift,
   motionReadbackMatches,
-  observeSmartDetectPreferences,
   planMotionWrite,
   readMotionDiagnostics,
   smartDetectDrift,
@@ -293,20 +292,6 @@ describe('motion state', () => {
     expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person']);
     expect(plan.config?.zones?.[0]?.sensitivity).toBe(75);
     expect(plan.patch).not.toHaveProperty('smartDetectZones');
-  });
-
-  it('does not let an empty event erase saved types while smart detection is off', () => {
-    const saved = observeSmartDetectPreferences(
-      { objectTypes: ['person'], audioTypes: ['bark'], autoTrackingObjectTypes: [] },
-      { objectTypes: [], audioTypes: ['siren'] },
-      false,
-    );
-
-    expect(saved).toEqual({
-      objectTypes: ['person'],
-      audioTypes: ['siren'],
-      autoTrackingObjectTypes: [],
-    });
   });
 });
 

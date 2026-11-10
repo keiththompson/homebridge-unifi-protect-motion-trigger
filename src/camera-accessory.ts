@@ -265,6 +265,9 @@ export class CameraAccessory {
         ...settings,
         smartDetectConfig: settings.smartDetect !== undefined ? this.smartDetectConfig : undefined,
       });
+      if (outcome.camera) {
+        this.accessory.context.camera = outcome.camera;
+      }
       if (settings.smartDetect !== undefined && outcome.smartDetectConfig) {
         this.smartDetectConfig = outcome.smartDetectConfig;
       }
@@ -426,11 +429,7 @@ export class CameraAccessory {
   }
 
   public handleSmartDetectUpdate(partial: Partial<ProtectCamera>): void {
-    const current = this.camera;
-    const merged: ProtectCamera = { ...current, ...partial };
-    if (partial.smartDetectSettings) {
-      merged.smartDetectSettings = { ...current.smartDetectSettings, ...partial.smartDetectSettings };
-    }
+    const merged = mergeSmartDetectUpdate(this.camera, partial);
     this.accessory.context.camera = merged;
     if (!this.smartSwitch) {
       return;
@@ -451,4 +450,52 @@ export class CameraAccessory {
   private updateLedSwitchState(enabled: boolean): void {
     this.ledSwitch.updateCharacteristic(this.platform.Characteristic.On, enabled);
   }
+}
+
+/**
+ * Applies a websocket smart-detection update onto the last confirmed camera.
+ * Settings lists merge field by field. Zone arrays are replaced only when the
+ * event includes them. A settings update that clears every list and omits zones
+ * also clears cached zone object types, so an older zone list cannot turn the
+ * switch back on.
+ */
+export function mergeSmartDetectUpdate(current: ProtectCamera, partial: Partial<ProtectCamera>): ProtectCamera {
+  const merged: ProtectCamera = { ...current };
+  if (partial.smartDetectSettings) {
+    merged.smartDetectSettings = { ...(current.smartDetectSettings ?? {}), ...partial.smartDetectSettings };
+  }
+  if (Object.prototype.hasOwnProperty.call(partial, 'smartDetectZones')) {
+    merged.smartDetectZones = partial.smartDetectZones;
+  } else if (partial.smartDetectSettings && settingsListsCleared(merged.smartDetectSettings)) {
+    merged.smartDetectZones = clearZoneObjectTypes(current.smartDetectZones);
+  }
+  if (Object.prototype.hasOwnProperty.call(partial, 'secondLensSmartDetectZones')) {
+    merged.secondLensSmartDetectZones = partial.secondLensSmartDetectZones;
+  } else if (partial.smartDetectSettings && settingsListsCleared(merged.smartDetectSettings)) {
+    merged.secondLensSmartDetectZones = clearZoneObjectTypes(current.secondLensSmartDetectZones);
+  }
+  return merged;
+}
+
+function settingsListsCleared(settings: ProtectCamera['smartDetectSettings']): boolean {
+  if (!settings) {
+    return false;
+  }
+  return (
+    (settings.objectTypes?.length ?? 0) === 0 &&
+    (settings.audioTypes?.length ?? 0) === 0 &&
+    (settings.autoTrackingObjectTypes?.length ?? 0) === 0
+  );
+}
+
+function clearZoneObjectTypes(zones: ProtectCamera['smartDetectZones']): ProtectCamera['smartDetectZones'] {
+  if (!Array.isArray(zones)) {
+    return zones;
+  }
+  return zones.map((zone) => {
+    if (!zone || typeof zone !== 'object' || Array.isArray(zone)) {
+      return zone;
+    }
+    return { ...(zone as Record<string, unknown>), objectTypes: [] };
+  });
 }

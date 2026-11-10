@@ -94,4 +94,6 @@ export interface UpdateOutcome {
    * Null when there is nothing to restore. An already-disabled config is not returned here.
    */
   smartDetectConfig: SmartDetectConfig | null;
+  /** Camera from the confirmed GET, when this write read the device back. */
+  camera: ProtectCamera | null;
 }

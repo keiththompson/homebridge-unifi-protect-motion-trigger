@@ -270,11 +270,13 @@ export class ProtectClient {
       result: UpdateResult,
       smartDetectResult: UpdateResult | null = wantsSmart ? result : null,
       config: SmartDetectConfig | null = keptConfig,
+      confirmed: ProtectCamera | null = null,
     ): UpdateOutcome => ({
       result,
       smartDetectResult,
       smartDetectPreferences: preferencesFromConfig(config),
       smartDetectConfig: config,
+      camera: confirmed,
     });
 
     if (!wantsLed && !wantsMotion && !wantsSmart) {
@@ -354,11 +356,16 @@ export class ProtectClient {
       expected.createMotionEvents = settings.motion;
     }
 
-    const done = (result: UpdateResult, smartDetectResult: UpdateResult | null): UpdateOutcome => ({
+    const done = (
+      result: UpdateResult,
+      smartDetectResult: UpdateResult | null,
+      confirmed: ProtectCamera | null = null,
+    ): UpdateOutcome => ({
       result,
       smartDetectResult,
       smartDetectPreferences: preferencesFromConfig(config),
       smartDetectConfig: config,
+      camera: confirmed,
     });
 
     try {
@@ -429,7 +436,7 @@ export class ProtectClient {
           this.log.info(`${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`);
         }
         const result = controlsRequested ? controlResult : (smartResult ?? 'failed');
-        return done(result, smartResult);
+        return done(result, smartResult, readback.camera);
       }
 
       this.snapshots.set(

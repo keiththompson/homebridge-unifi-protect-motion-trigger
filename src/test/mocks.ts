@@ -63,13 +63,25 @@ export function createMockAccessory(displayName: string, uuid: string): Platform
     UUID: uuid,
     context: {} as Record<string, unknown>,
     getService: vi.fn((type: unknown) => services.get(String(type))),
-    getServiceById: vi.fn((_type: unknown, _subtype: string) => undefined),
+    getServiceById: vi.fn((_type: unknown, subtype: string) => servicesBySubtype.get(subtype)),
     getServiceBySubtype: (subtype: string) => servicesBySubtype.get(subtype),
     addService: vi.fn((type: unknown, _name: string, subtype: string) => {
       const service = createMockService();
       services.set(`${String(type)}-${subtype}`, service);
       servicesBySubtype.set(subtype, service);
       return service;
+    }),
+    removeService: vi.fn((service: Service) => {
+      for (const [key, value] of services) {
+        if (value === service) {
+          services.delete(key);
+        }
+      }
+      for (const [key, value] of servicesBySubtype) {
+        if (value === service) {
+          servicesBySubtype.delete(key);
+        }
+      }
     }),
   };
 
