@@ -10,8 +10,8 @@ export const DEFAULT_MOTION_DURATION = 10; // seconds
 // plugin's connection health without the Homebridge UI API (which needs auth).
 export const HEALTH_FILENAME = '.unifi-protect-motion-trigger-health.json';
 
-// Pre-disable smart-detection snapshots. Written before shields go down so a
-// restart can restore each camera's own zones and object types.
+// Saved before the Smart Detection switch turns a camera off, so a restart
+// can restore that camera's own zones and object types.
 export const SMART_DETECT_SNAPSHOT_FILENAME = '.unifi-protect-motion-trigger-smart-detect.json';
 
 // home-monitor treats a snapshot older than 300s as stale (HEALTH_STALE_SECS).
@@ -28,4 +28,9 @@ export interface ProtectMotionPlatformConfig extends PlatformConfig {
   controllers?: ControllerConfig[];
   motionDuration?: number;
   debug?: boolean;
+  /**
+   * When false, cameras are not given a Smart Detection switch.
+   * Omitted or true shows the switch.
+   */
+  showSmartDetection?: boolean;
 }

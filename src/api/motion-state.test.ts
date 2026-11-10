@@ -8,7 +8,7 @@ import {
   readMotionDiagnostics,
   smartDetectDrift,
 } from './motion-state.js';
-import type { SmartDetectConfig } from './smart-detect.js';
+import { planSmartDetectWrite, type SmartDetectConfig } from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
 
 const camera = {
@@ -33,31 +33,18 @@ describe('motion state', () => {
     expect(diagnostics.smartDetect?.objectTypes).toEqual(['person']);
   });
 
-  it('plans a disable that remembers types and does not use motionSettings', () => {
-    const plan = planMotionWrite(false, camera, null);
+  it('plans a motion disable that only changes Create Motion Events', () => {
+    const plan = planMotionWrite(false);
 
     expect(plan.payload).toEqual({
       recordingSettings: { enableMotionDetection: false },
-      smartDetectSettings: {
-        objectTypes: [],
-        audioTypes: [],
-        autoTrackingObjectTypes: [],
-      },
     });
     expect(plan.payload).not.toHaveProperty('motionSettings');
-    expect(plan.preferences).toEqual({
-      objectTypes: ['person'],
-      audioTypes: [],
-      autoTrackingObjectTypes: ['person'],
-    });
-    expect(plan.expectedSmartDetect).toEqual({
-      objectTypes: [],
-      audioTypes: [],
-      autoTrackingObjectTypes: [],
-    });
+    expect(plan.payload).not.toHaveProperty('smartDetectSettings');
+    expect(plan.payload).not.toHaveProperty('smartDetectZones');
   });
 
-  it('restores the saved snapshot exactly, including a type chosen while shields were down', () => {
+  it('restores the saved snapshot exactly, including a type chosen while smart detection was off', () => {
     const live = {
       ...camera,
       recordingSettings: { enableMotionDetection: false },
@@ -72,15 +59,15 @@ describe('motion state', () => {
       secondLensZones: null,
     };
 
-    const plan = planMotionWrite(true, live, saved);
+    const plan = planSmartDetectWrite(true, live, saved);
 
-    expect(plan.payload.smartDetectSettings).toEqual({
+    expect(plan.patch.smartDetectSettings).toEqual({
       objectTypes: ['person'],
       audioTypes: ['bark'],
       autoTrackingObjectTypes: ['person'],
     });
-    expect(plan.expectedSmartDetect?.objectTypes).toEqual(['person']);
-    expect(plan.payload).not.toHaveProperty('smartDetectZones');
+    expect(plan.expectedConfig?.objectTypes).toEqual(['person']);
+    expect(plan.patch).not.toHaveProperty('smartDetectZones');
   });
 
   it('disables and restores each camera zone without borrowing another camera defaults', () => {
@@ -107,10 +94,10 @@ describe('motion state', () => {
       ],
     );
 
-    const drivewayOff = planMotionWrite(false, driveway, null);
-    const yardOff = planMotionWrite(false, yard, null);
+    const drivewayOff = planSmartDetectWrite(false, driveway, null);
+    const yardOff = planSmartDetectWrite(false, yard, null);
 
-    expect(drivewayOff.payload.smartDetectZones).toEqual([
+    expect(drivewayOff.patch.smartDetectZones).toEqual([
       expect.objectContaining({
         name: 'Street',
         sensitivity: 75,
@@ -122,7 +109,7 @@ describe('motion state', () => {
         ],
       }),
     ]);
-    expect(yardOff.payload.smartDetectZones).toEqual([
+    expect(yardOff.patch.smartDetectZones).toEqual([
       expect.objectContaining({
         name: 'Yard',
         sensitivity: 50,
@@ -134,24 +121,25 @@ describe('motion state', () => {
         ],
       }),
     ]);
+    expect(drivewayOff.patch.smartDetectZones?.[0]).not.toHaveProperty('mergeId');
     expect(drivewayOff.config?.zones?.[0]?.sensitivity).toBe(75);
     expect(yardOff.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
 
-    const drivewayOn = planMotionWrite(true, disabledCamera(driveway), drivewayOff.config);
-    const yardOn = planMotionWrite(true, disabledCamera(yard), yardOff.config);
+    const drivewayOn = planSmartDetectWrite(true, disabledCamera(driveway), drivewayOff.config);
+    const yardOn = planSmartDetectWrite(true, disabledCamera(yard), yardOff.config);
 
-    expect(drivewayOn.payload.smartDetectZones?.[0]).toMatchObject({
+    expect(drivewayOn.patch.smartDetectZones?.[0]).toMatchObject({
       name: 'Street',
       sensitivity: 75,
       objectTypes: ['person'],
     });
-    expect(yardOn.payload.smartDetectZones?.[0]).toMatchObject({
+    expect(yardOn.patch.smartDetectZones?.[0]).toMatchObject({
       name: 'Yard',
       sensitivity: 50,
       objectTypes: ['person', 'vehicle'],
     });
-    expect(drivewayOn.payload.smartDetectSettings?.objectTypes).toEqual(['person']);
-    expect(yardOn.payload.smartDetectSettings?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(drivewayOn.patch.smartDetectSettings?.objectTypes).toEqual(['person']);
+    expect(yardOn.patch.smartDetectSettings?.objectTypes).toEqual(['person', 'vehicle']);
   });
 
   it('rejects readback that still has Create Motion Events enabled', () => {
@@ -163,13 +151,12 @@ describe('motion state', () => {
     ).toBe(false);
   });
 
-  it('reports drift when motion events are off but a smart detection type remains', () => {
+  it('does not treat remaining smart detection as motion drift', () => {
     const drift = motionDrift(false, {
       createMotionEvents: false,
-      smartDetect: { objectTypes: ['person'], audioTypes: [], autoTrackingObjectTypes: [] },
     });
 
-    expect(drift).toBe(true);
+    expect(drift).toBe(false);
   });
 
   it('reports drift when zone object types remain after settings lists were cleared', () => {
@@ -192,8 +179,8 @@ describe('motion state', () => {
       actual.smartDetectConfig.autoTrackingObjectTypes = [];
     }
 
-    expect(smartDetectDrift(false, actual.smartDetectConfig, actual.smartDetect, null)).toBe(true);
-    expect(motionDrift(false, actual)).toBe(true);
+    expect(smartDetectDrift(false, actual.smartDetectConfig, null)).toBe(true);
+    expect(motionDrift(false, actual)).toBe(false);
   });
 
   it('keeps saved settings lists when a previous version cleared them but left zones on', () => {
@@ -218,13 +205,13 @@ describe('motion state', () => {
       secondLensZones: null,
     };
 
-    const plan = planMotionWrite(false, live, saved);
+    const plan = planSmartDetectWrite(false, live, saved);
 
     expect(plan.config?.objectTypes).toEqual(['person', 'vehicle']);
     expect(plan.config?.audioTypes).toEqual(['bark']);
     expect(plan.config?.zones?.[0]).toMatchObject({ name: 'Street', sensitivity: 75, objectTypes: ['person'] });
-    expect(plan.payload.smartDetectSettings?.objectTypes).toEqual([]);
-    expect(plan.payload.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: [] });
+    expect(plan.patch.smartDetectSettings?.objectTypes).toEqual([]);
+    expect(plan.patch.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: [] });
   });
 
   it('clears and restores a second-lens zone without using the primary zone sensitivity', () => {
@@ -254,25 +241,25 @@ describe('motion state', () => {
       },
     ];
 
-    const disabled = planMotionWrite(false, camera, null);
-    expect(disabled.payload.secondLensSmartDetectZones?.[0]).toMatchObject({
+    const disabled = planSmartDetectWrite(false, camera, null);
+    expect(disabled.patch.secondLensSmartDetectZones?.[0]).toMatchObject({
       name: 'Package',
       sensitivity: 40,
       objectTypes: [],
     });
-    expect(disabled.payload.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: [] });
+    expect(disabled.patch.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: [] });
 
-    const restored = planMotionWrite(true, disabledCamera(camera), disabled.config);
-    expect(restored.payload.secondLensSmartDetectZones?.[0]).toMatchObject({
+    const restored = planSmartDetectWrite(true, disabledCamera(camera), disabled.config);
+    expect(restored.patch.secondLensSmartDetectZones?.[0]).toMatchObject({
       name: 'Package',
       sensitivity: 40,
       objectTypes: ['package'],
     });
-    expect(restored.payload.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: ['person'] });
+    expect(restored.patch.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: ['person'] });
   });
 
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {
-    const saved = planMotionWrite(
+    const saved = planSmartDetectWrite(
       false,
       cameraWithZone(
         'Driveway',
@@ -301,14 +288,14 @@ describe('motion state', () => {
       ),
     );
 
-    const plan = planMotionWrite(false, disabled, saved);
+    const plan = planSmartDetectWrite(false, disabled, saved);
 
     expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person']);
     expect(plan.config?.zones?.[0]?.sensitivity).toBe(75);
-    expect(plan.payload).not.toHaveProperty('smartDetectZones');
+    expect(plan.patch).not.toHaveProperty('smartDetectZones');
   });
 
-  it('does not let an empty event erase saved types while motion is off', () => {
+  it('does not let an empty event erase saved types while smart detection is off', () => {
     const saved = observeSmartDetectPreferences(
       { objectTypes: ['person'], audioTypes: ['bark'], autoTrackingObjectTypes: [] },
       { objectTypes: [], audioTypes: ['siren'] },
@@ -352,6 +339,7 @@ function cameraWithZone(
         points,
         sensitivity,
         objectTypes: [...objectTypes],
+        mergeId: 'read-only',
       },
     ],
   };

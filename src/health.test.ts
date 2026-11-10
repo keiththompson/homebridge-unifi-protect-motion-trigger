@@ -29,6 +29,7 @@ function report(
   snapshot: ReturnType<typeof snapshotFromCamera> | ReturnType<typeof errorSnapshot> | null,
   intended: boolean | null,
   generatedAt = now,
+  intendedSmartDetect: boolean | null = null,
 ): ReturnType<typeof buildHealthReport> {
   return buildHealthReport({
     pluginVersion: '1.1.0',
@@ -46,6 +47,7 @@ function report(
             name: 'Front Door',
             intendedMotionEnabled: intended,
             smartDetectPreferencesSaved: false,
+            intendedSmartDetect,
             smartDetectSnapshot: null,
             snapshot,
           },
@@ -89,19 +91,28 @@ describe('health report', () => {
     expect(cameraHealth?.readback.attempts).toBe(2);
   });
 
-  it('reports drift when motion events are off but smart detections are still configured', () => {
+  it('does not treat active smart detection as motion drift', () => {
     const disabled = {
       ...camera,
       recordingSettings: { enableMotionDetection: false },
     } as unknown as ProtectCamera;
     const health = report(snapshotFromCamera(disabled, now, 1), false);
 
-    expect(health.controllers[0]?.cameras[0]?.readback.status).toBe('mismatch');
-    expect(health.controllers[0]?.cameras[0]?.drift).toBe(true);
+    expect(health.controllers[0]?.cameras[0]?.readback.status).toBe('verified');
+    expect(health.controllers[0]?.cameras[0]?.drift).toBe(false);
+    expect(health.controllers[0]?.cameras[0]?.smartDetectDrift).toBeNull();
     expect(health.controllers[0]?.cameras[0]?.smartDetectObjectTypes).toEqual(['person']);
-    expect(health.controllers[0]?.cameras[0]?.smartDetectDrift).toBe(true);
-    expect(health.controllers[0]?.cameras[0]?.smartDetectExpected?.objectTypes).toEqual([]);
-    expect(health.controllers[0]?.cameras[0]?.smartDetectActual?.objectTypes).toEqual(['person']);
+  });
+
+  it('reports smart detection drift when that switch is off but object types remain', () => {
+    const health = report(snapshotFromCamera(camera, now, 1), true, now, false);
+    const cameraHealth = health.controllers[0]?.cameras[0];
+
+    expect(cameraHealth?.readback.status).toBe('mismatch');
+    expect(cameraHealth?.drift).toBe(true);
+    expect(cameraHealth?.smartDetectDrift).toBe(true);
+    expect(cameraHealth?.smartDetectExpected?.objectTypes).toEqual([]);
+    expect(cameraHealth?.smartDetectActual?.objectTypes).toEqual(['person']);
   });
 
   it('reports zone drift separately from a cleared settings list', () => {
@@ -123,7 +134,7 @@ describe('health report', () => {
         },
       ],
     } as unknown as ProtectCamera;
-    const health = report(snapshotFromCamera(disabled, now, 2), false);
+    const health = report(snapshotFromCamera(disabled, now, 2), false, now, false);
     const cameraHealth = health.controllers[0]?.cameras[0];
 
     expect(cameraHealth?.smartDetectObjectTypes).toEqual([]);

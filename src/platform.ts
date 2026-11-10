@@ -34,8 +34,13 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   private readonly sessions = new Map<string, ControllerSession>();
   private readonly motionDuration: number;
   private readonly debug: boolean;
+  public readonly showSmartDetection: boolean;
   private healthWriter: ReturnType<typeof setInterval> | null = null;
-  private readonly smartDetectStore = new SmartDetectSnapshotStore(() => this.healthStoragePath());
+  private readonly smartDetectStore = new SmartDetectSnapshotStore(() => this.healthStoragePath(), {
+    warn: (message: string) => {
+      this.log.warn(message);
+    },
+  });
 
   public get Service(): typeof this.api.hap.Service {
     return this.api.hap.Service;
@@ -53,6 +58,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     const platformConfig = config as ProtectMotionPlatformConfig;
     this.motionDuration = platformConfig.motionDuration ?? DEFAULT_MOTION_DURATION;
     this.debug = platformConfig.debug ?? false;
+    this.showSmartDetection = platformConfig.showSmartDetection !== false;
 
     this.log.info('Initializing platform:', PLATFORM_NAME);
 
@@ -247,6 +253,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
         name: camera.name,
         intendedMotionEnabled: accessory ? accessory.motionEnabledState : null,
         smartDetectPreferencesSaved: smartDetectConfigActive(smartDetectSnapshot),
+        intendedSmartDetect: accessory ? accessory.smartDetectState : null,
         smartDetectSnapshot,
         snapshot: client.getCameraSnapshot(camera.id),
       };
@@ -348,9 +355,13 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
       settingsChanged = true;
     }
 
-    if (cameraPayload.smartDetectSettings) {
-      this.debugLog(`Smart detection settings updated on camera ${id}`);
-      cameraAccessory.handleSmartDetectSettingsUpdate(cameraPayload.smartDetectSettings);
+    if (
+      cameraPayload.smartDetectSettings ||
+      cameraPayload.smartDetectZones ||
+      cameraPayload.secondLensSmartDetectZones
+    ) {
+      this.debugLog(`Smart detection updated on camera ${id}`);
+      cameraAccessory.handleSmartDetectUpdate(cameraPayload);
       settingsChanged = true;
     }
 

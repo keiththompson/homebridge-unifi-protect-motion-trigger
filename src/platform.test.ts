@@ -138,7 +138,6 @@ describe('ProtectMotionPlatform health', () => {
     expect(switchValue(created)).toBe(false);
 
     apiState.camera.recordingSettings.enableMotionDetection = false;
-    apiState.camera.smartDetectSettings.objectTypes = [];
     const refreshed = await platform.getHealth({ refresh: true });
     expect(refreshed.controllers[0]?.cameras[0]?.createMotionEvents).toBe(false);
     expect(refreshed.controllers[0]?.cameras[0]?.drift).toBe(false);

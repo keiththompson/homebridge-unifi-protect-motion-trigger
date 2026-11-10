@@ -111,6 +111,8 @@ export interface HealthCameraInput {
   name: string;
   intendedMotionEnabled: boolean | null;
   smartDetectPreferencesSaved: boolean;
+  /** Smart Detection switch, or null when that switch is hidden or not loaded. */
+  intendedSmartDetect: boolean | null;
   /** Active pre-disable snapshot, or null when this camera has nothing to restore. */
   smartDetectSnapshot: SmartDetectConfig | null;
   snapshot: CameraReadbackSnapshot | null;
@@ -215,7 +217,9 @@ export function interpretCameraHealth(
     smartDetect: snapshot.smartDetect,
     smartDetectConfig: snapshot.smartDetectConfig,
   };
-  const drift = motionDrift(camera.intendedMotionEnabled, diagnostics, camera.smartDetectSnapshot);
+  const motionDisagrees = motionDrift(camera.intendedMotionEnabled, diagnostics);
+  const smartDisagrees = smart.smartDetectDrift;
+  const drift = motionDisagrees === null ? null : motionDisagrees || smartDisagrees === true;
   const age = snapshot.fetchedAt === null ? Number.POSITIVE_INFINITY : now - snapshot.fetchedAt;
   const stale = age > staleAfterMs;
   let status: HealthReadbackStatus = 'verified';
@@ -278,13 +282,12 @@ function smartDetectFields(
   snapshot: CameraReadbackSnapshot | null,
 ): Pick<CameraHealth, 'smartDetectExpected' | 'smartDetectActual' | 'smartDetectDrift'> {
   const actual = snapshot?.ok ? snapshot.smartDetectConfig : null;
-  const lists = snapshot?.ok ? snapshot.smartDetect : null;
   const saved = camera.smartDetectSnapshot;
-  const expected = expectedSmartDetect(camera.intendedMotionEnabled, saved, actual);
+  const expected = expectedSmartDetect(camera.intendedSmartDetect, saved, actual);
   return {
     smartDetectExpected: toSmartDetectHealthState(expected),
     smartDetectActual: toSmartDetectHealthState(actual),
-    smartDetectDrift: smartDetectDrift(camera.intendedMotionEnabled, actual, lists, saved),
+    smartDetectDrift: smartDetectDrift(camera.intendedSmartDetect, actual, saved),
   };
 }
 
@@ -296,7 +299,7 @@ function expectedSmartDetect(
   if (intended === null) {
     return null;
   }
-  if (intended === false) {
+  if (!intended) {
     if (saved && smartDetectConfigActive(saved)) {
       return disableSmartDetect(saved);
     }

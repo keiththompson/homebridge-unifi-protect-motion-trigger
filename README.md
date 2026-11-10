@@ -9,7 +9,8 @@ This plugin is designed to work alongside [Scrypted](https://github.com/koush/sc
 Each camera is exposed as a HomeKit accessory with:
 
 - **Motion Sensor** - Triggers HomeKit automations when the camera detects motion
-- **Motion Enabled Switch** - Turns UniFi Protect **Create Motion Events** on or off. Shields down also turns off smart detection for that camera. Shields up restores that camera's own saved zones and detection types. Recording mode is left alone, so continuous recording is unchanged.
+- **Motion Enabled Switch** - Turns UniFi Protect **Create Motion Events** on or off. It does not change smart detection. Recording mode is left alone, so continuous recording is unchanged.
+- **Smart Detection Switch** - Turns that camera's smart detection off and back on. Off saves the camera's own zones and detection types, then clears `objectTypes`. On writes that snapshot back. Shown by default; set `showSmartDetection` to `false` to hide it.
 - **Status LED Switch** - Control the camera's indicator LED on/off
 
 ## Installation
@@ -41,6 +42,7 @@ Add the platform to your Homebridge `config.json`:
         }
       ],
       "motionDuration": 10,
+      "showSmartDetection": true,
       "debug": false
     }
   ]
@@ -57,6 +59,7 @@ Add the platform to your Homebridge `config.json`:
 | `controllers[].username` | Yes      | -       | Local user account username                                |
 | `controllers[].password` | Yes      | -       | Local user account password                                |
 | `motionDuration`         | No       | `10`    | Seconds before motion sensor resets after detecting motion |
+| `showSmartDetection`     | No       | `true`  | Show the Smart Detection switch on each camera             |
 | `debug`                  | No       | `false` | Enable debug logging                                       |
 
 ## UniFi Protect User Setup
@@ -74,13 +77,19 @@ For security, create a dedicated local user for Homebridge:
 
 - **Motion Detection**: The plugin connects to UniFi Protect's real-time WebSocket API. When a camera detects motion, the motion sensor triggers in HomeKit, allowing you to build automations.
 
-- **Motion Enabled Switch**: This changes the camera's `recordingSettings.enableMotionDetection` flag (Create Motion Events in the Protect UI) through the private Protect API used by `unifi-protect`. It does **not** write `motionSettings.isEnabled`. That field belongs to Protect sensors; on current cameras it is null, and a PATCH that sets it can return success without changing Create Motion Events. Recording mode (`always`, `detections`, or `never`) is not modified.
+- **Motion Enabled Switch**: This changes the camera's `recordingSettings.enableMotionDetection` flag (Create Motion Events in the Protect UI) through the private Protect API used by `unifi-protect`. It does **not** write `motionSettings.isEnabled`, and it does **not** change smart detection. `motionSettings` belongs to Protect sensors; on current cameras it is null, and a PATCH that sets it can return success without changing Create Motion Events. Recording mode (`always`, `detections`, or `never`) is not modified.
 
-  Current Protect cameras have no smart-detection enable flag. Detection is on when `smartDetectSettings` lists object, audio, or auto-tracking types, or when `smartDetectZones[]` (and `secondLensSmartDetectZones[]` on dual-lens cameras) has a non-empty `objectTypes` list. Shields down reads each camera, saves that camera's settings lists and zone objects, then writes the same zones back with `objectTypes` cleared. Names, points, sensitivity, color, and ids are copied from the camera. They are not replaced with defaults. Shields up writes that saved snapshot back. A camera whose zone sensitivity is 75 is restored at 75 even when another camera's zone is 50.
+  The plugin reads the camera back with `GET /proxy/protect/api/cameras/{id}` after the PATCH. It tries immediately, then after 250ms, then after 500ms. Success is logged only when that read shows the requested Create Motion Events value. A PATCH body that echoes the new value is not enough. If that flag never agrees, HomeKit reverts the switch.
 
-  The snapshot is written to `{Homebridge storage}/.unifi-protect-motion-trigger-smart-detect.json` before the disable PATCH. A restart while shields are down reloads that file. A camera that is already disabled does not replace a saved snapshot. If one camera's smart-detection write fails, that camera's Create Motion Events change is still attempted and the other cameras are still updated.
+- **Smart Detection Switch**: Current Protect cameras have no smart-detection enable flag. Detection is on when `smartDetectSettings` lists object, audio, or auto-tracking types, or when `smartDetectZones[]` (and `secondLensSmartDetectZones[]` on a dual-lens camera) has a non-empty `objectTypes` list. Turning the switch off reads that camera, saves its settings lists and zone objects, then writes the same zones back with `objectTypes` cleared. Names, points, sensitivity, color, and ids are copied from the camera. They are not replaced with defaults. One camera's zone at sensitivity 75 is restored at 75 even when another camera's zone is 50. Turning the switch on writes that camera's saved snapshot back.
 
-  The plugin reads the camera back with `GET /proxy/protect/api/cameras/{id}` after the PATCH. It tries immediately, then after 250ms, then after 500ms. Success is logged only when that read shows the requested Create Motion Events value and, when smart detection was part of the write, the requested settings lists and zones. A PATCH body that echoes the new value is not enough. If the motion flag never agrees, HomeKit reverts the switch. If the flag matches but smart detection does not, HomeKit follows the confirmed Create Motion Events value, an error is logged, and health reports smart-detection drift.
+  The HomeKit switch follows the smart-detection state read from Protect. A camera discovered with smart detection already off shows the switch off, and that empty state is not saved as the snapshot. If there is no saved snapshot, turning the switch on does not invent a zone; the switch returns to off and Protect is left unchanged.
+
+  The snapshot is written to `{Homebridge storage}/.unifi-protect-motion-trigger-smart-detect.json` before the disable PATCH. A restart while the switch is off reloads that file. A camera that is already off does not replace a saved snapshot. The zone PATCH sends only fields Protect accepts (`id`, `name`, `color`, `points`, `sensitivity`, `objectTypes`, and `isTriggerLightEnabled` when the camera has it). If that write is rejected, it is retried without the optional fields. A failed smart-detection write does not block the Motion Enabled or Status LED change in the same request, and it does not block the next camera.
+
+  Motion Enabled, Smart Detection, and Status LED share one write queue per controller. A scene that flips more than one switch on the same camera sends them in one request, so they cannot race.
+
+  Read-back works the same way as Create Motion Events. The log line `smart detection disabled` or `smart detection restored` is written only after the camera GET agrees. If it does not, HomeKit reverts the Smart Detection switch and health reports drift.
 
 - **Status LED Switch**: This directly controls the camera's indicator LED via the UniFi Protect API, and that change is also confirmed by reading the camera back.
 
@@ -88,6 +97,7 @@ For security, create a dedicated local user for Homebridge:
 
 - Trigger HomeKit automations when motion is detected (lights, notifications, etc.)
 - Disable motion notifications at night without affecting UniFi Protect recordings
+- Turn smart detection off and back on without changing Create Motion Events or recording mode
 - Control camera status LEDs from HomeKit/Siri
 - Use alongside Scrypted for video streaming with separate motion control
 
@@ -108,7 +118,7 @@ For security, create a dedicated local user for Homebridge:
 ### Switch says it changed but Protect did not
 
 - A controller can accept a PATCH and leave `recordingSettings.enableMotionDetection` unchanged. This plugin treats that as a failure after readback and reverts the HomeKit switch.
-- Health `readback.status` of `mismatch` or `drift: true` means the last camera read does not match the switch. `stale` means that read is older than five minutes. `unknown` means the flag has not been read. `error` means the last read failed. Do not treat those as a successful shields change.
+- Health `readback.status` of `mismatch` or `drift: true` means the last camera read does not match a switch. `stale` means that read is older than five minutes. `unknown` means the motion flag has not been read. `error` means the last read failed.
 
 ## Health
 
@@ -153,11 +163,17 @@ home-monitor reads `updatedAtEpoch` (falling back to the file mtime) and treats 
 
 `verified` means the latest read is fresh and does not disagree with the switch. It does not by itself mean a write was attempted. Trust `drift` only when `readback.status` is `verified` or `mismatch`. A websocket update can move the HomeKit switch before the next GET; call `getHealth({ refresh: true })` before treating the document as current.
 
-### Checking smart detection on a Protect console
+### Checking the Smart Detection switch
 
-After shields go down, each managed camera's Protect settings should show smart detection with no object types selected. Zone shapes and sensitivity stay as they were. After shields go up, each camera should show its previous object types and the same zones (a driveway zone at sensitivity 75 stays 75; a yard zone at 50 stays 50). The Homebridge log line `smart detection disabled` or `smart detection restored` is written only after the camera GET agrees. In the health file, `controllers[].cameraHealth[].smartDetectDrift` is false and `readback.status` is `verified` when the read matches. `smartDetectExpected` and `smartDetectActual` show the object types and zone name, sensitivity, and points.
+Turn **Smart Detection** off for one camera. In Protect, that camera's smart-detection object types should be cleared. Zone shapes and sensitivity stay as they were. The Motion Enabled switch and recording mode stay as they were. The log includes `smart detection disabled` only after the camera GET agrees.
 
-`smartDetectLines` and loiter zones are not changed. Protect has no separate smart-detection enable switch to flip instead.
+`.unifi-protect-motion-trigger-smart-detect.json` should contain that camera's original object types, zone name, points, and sensitivity. Another camera keeps its own values. In the health file, `cameraHealth[].smartDetectDrift` is false and `readback.status` is `verified` when the read matches. `smartDetectExpected` and `smartDetectActual` show the object types and each zone's name, sensitivity, and points.
+
+Restart Homebridge while the switch stays off. The snapshot file should still contain the original types, not the cleared ones. Turn **Smart Detection** on. That camera gets its own zones and object types back. A zone that was sensitivity 75 is 75 again, even if a different camera's zone is 50.
+
+A camera that is already off when Homebridge starts shows the switch off. Turning it on with no saved snapshot does not create a zone.
+
+`smartDetectLines` and loiter zones are not changed. Set `showSmartDetection` to `false` to hide the switch.
 
 ### LED control not working
 

@@ -123,7 +123,7 @@ export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig
 }
 
 /**
- * Picks the config to keep for a later shields-up restore.
+ * Picks the config to keep so the Smart Detection switch can turn it back on.
  * An active camera read replaces the saved snapshot. A disabled read does not.
  * Settings lists that were already cleared (1.0.11 only cleared those) are kept
  * from the saved snapshot when the live zones are still the user's zones.
@@ -206,6 +206,65 @@ export function smartDetectPatch(config: SmartDetectConfig, mode: 'restore' | 'd
     patch.secondLensSmartDetectZones = source.secondLensZones.map((zone) => zonePayload(zone));
   }
   return patch;
+}
+
+export interface SmartDetectWritePlan {
+  patch: SmartDetectPatch;
+  /** Active snapshot to keep. Null when this camera has nothing to restore. */
+  config: SmartDetectConfig | null;
+  /** State the next camera read must show. Null when this write could not be checked. */
+  expectedConfig: SmartDetectConfig | null;
+  /** The switch was turned on and this camera has no saved configuration to restore. */
+  nothingToRestore: boolean;
+}
+
+/**
+ * Builds the smart-detection PATCH for the Smart Detection switch.
+ * Off clears object types and remembers the camera's own zones.
+ * On writes that snapshot back. It does not invent a default zone.
+ */
+export function planSmartDetectWrite(
+  enabled: boolean,
+  camera: ProtectCamera | null,
+  saved: SmartDetectConfig | null,
+): SmartDetectWritePlan {
+  const live = camera ? readSmartDetectConfig(camera) : null;
+
+  if (!enabled) {
+    const snapshot = retainSmartDetectSnapshot(saved, live);
+    if (!live || !hasSmartDetectRecord(live)) {
+      return { patch: {}, config: snapshot, expectedConfig: null, nothingToRestore: false };
+    }
+    if (!smartDetectConfigActive(live)) {
+      return {
+        patch: {},
+        config: snapshot,
+        expectedConfig: disableSmartDetect(live),
+        nothingToRestore: false,
+      };
+    }
+    return {
+      patch: smartDetectPatch(live, 'disable'),
+      config: snapshot,
+      expectedConfig: disableSmartDetect(live),
+      nothingToRestore: false,
+    };
+  }
+
+  const snapshot = saved && smartDetectConfigActive(saved) ? cloneSmartDetectConfig(saved) : null;
+  if (!snapshot) {
+    return { patch: {}, config: null, expectedConfig: null, nothingToRestore: true };
+  }
+  return {
+    patch: smartDetectPatch(snapshot, 'restore'),
+    config: snapshot,
+    expectedConfig: snapshot,
+    nothingToRestore: false,
+  };
+}
+
+function hasSmartDetectRecord(config: SmartDetectConfig): boolean {
+  return config.settingsPresent || config.zones !== null || config.secondLensZones !== null;
 }
 
 /**
@@ -325,22 +384,76 @@ function withClearedTypes(zone: SmartDetectZoneSnapshot): SmartDetectZoneSnapsho
   };
 }
 
+/**
+ * Fields Protect accepts on a smart-detection zone write.
+ * A camera GET can include extra fields (for example `mergeId`). Those are kept
+ * in the snapshot and omitted here so the PATCH is not rejected.
+ */
+const ZONE_PATCH_KEYS = [
+  'id',
+  'name',
+  'color',
+  'points',
+  'sensitivity',
+  'objectTypes',
+  'isTriggerLightEnabled',
+] as const;
+
+const MINIMAL_ZONE_PATCH_KEYS = ['id', 'name', 'points', 'sensitivity', 'objectTypes'] as const;
+
 function zonePayload(zone: SmartDetectZoneSnapshot): Record<string, unknown> {
-  const raw = cloneRecord(zone.raw);
-  if (zone.id !== null && raw.id === undefined) {
-    raw.id = zone.id;
+  const payload: Record<string, unknown> = {};
+  for (const key of ZONE_PATCH_KEYS) {
+    if (key === 'objectTypes') {
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(zone.raw, key) && zone.raw[key] !== undefined) {
+      payload[key] = structuredClone(zone.raw[key]);
+    }
   }
-  if (zone.name && raw.name === undefined) {
-    raw.name = zone.name;
+  if (payload.id === undefined && zone.id !== null) {
+    payload.id = zone.id;
   }
-  if (raw.points === undefined && zone.points) {
-    raw.points = zone.points.map((point) => [...point]);
+  if (payload.name === undefined && zone.name) {
+    payload.name = zone.name;
   }
-  if (zone.sensitivity !== null && raw.sensitivity === undefined) {
-    raw.sensitivity = zone.sensitivity;
+  if (payload.points === undefined && zone.points) {
+    payload.points = zone.points.map((point) => [...point]);
   }
-  raw.objectTypes = [...zone.objectTypes];
-  return raw;
+  if (payload.sensitivity === undefined && zone.sensitivity !== null) {
+    payload.sensitivity = zone.sensitivity;
+  }
+  payload.objectTypes = [...zone.objectTypes];
+  return payload;
+}
+
+/** Drops optional zone fields after a rejected write. Settings lists are unchanged. */
+export function minimalSmartDetectPatch(patch: SmartDetectPatch): SmartDetectPatch {
+  const next: SmartDetectPatch = {};
+  if (patch.smartDetectSettings) {
+    next.smartDetectSettings = {
+      objectTypes: [...patch.smartDetectSettings.objectTypes],
+      audioTypes: [...patch.smartDetectSettings.audioTypes],
+      autoTrackingObjectTypes: [...patch.smartDetectSettings.autoTrackingObjectTypes],
+    };
+  }
+  if (patch.smartDetectZones) {
+    next.smartDetectZones = patch.smartDetectZones.map((zone) => minimalZoneRecord(zone));
+  }
+  if (patch.secondLensSmartDetectZones) {
+    next.secondLensSmartDetectZones = patch.secondLensSmartDetectZones.map((zone) => minimalZoneRecord(zone));
+  }
+  return next;
+}
+
+function minimalZoneRecord(zone: Record<string, unknown>): Record<string, unknown> {
+  const minimal: Record<string, unknown> = {};
+  for (const key of MINIMAL_ZONE_PATCH_KEYS) {
+    if (zone[key] !== undefined) {
+      minimal[key] = zone[key];
+    }
+  }
+  return minimal;
 }
 
 function cloneZones(zones: SmartDetectZoneSnapshot[] | null): SmartDetectZoneSnapshot[] | null {

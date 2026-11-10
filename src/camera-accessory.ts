@@ -1,19 +1,17 @@
 import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
 
 import type { ProtectClient } from './api/client.js';
-import { observeSmartDetectPreferences } from './api/motion-state.js';
-import { sanitizeSmartDetectConfig, type SmartDetectConfig } from './api/smart-detect.js';
-import type {
-  LedSettings,
-  ProtectCamera,
-  SmartDetectPreferences,
-  SmartDetectSettings,
-  UpdateResult,
-} from './api/types.js';
+import {
+  readSmartDetectConfig,
+  sanitizeSmartDetectConfig,
+  type SmartDetectConfig,
+  smartDetectConfigActive,
+} from './api/smart-detect.js';
+import type { LedSettings, ProtectCamera, UpdateResult } from './api/types.js';
 import type { ProtectMotionPlatform } from './platform.js';
 
-// Window over which a camera's LED and motion writes are coalesced into one request.
-// A scene fires both switches' onSet handlers in the same tick, so a short window
+// Window over which a camera's switch writes are coalesced into one request.
+// A scene fires the switches' onSet handlers in the same tick, so a short window
 // captures them together while staying imperceptible to HomeKit.
 const BATCH_WINDOW_MS = 50;
 
@@ -21,6 +19,7 @@ export class CameraAccessory {
   private readonly motionSensor: Service;
   private readonly motionSwitch: Service;
   private readonly ledSwitch: Service;
+  private readonly smartSwitch: Service | null;
 
   private motionTimeout: NodeJS.Timeout | null = null;
   private lastMotionTime = 0;
@@ -30,6 +29,7 @@ export class CameraAccessory {
   // Pending switch changes awaiting a coalesced flush.
   private pendingLed?: boolean;
   private pendingMotion?: boolean;
+  private pendingSmart?: boolean;
   private flushTimer: NodeJS.Timeout | null = null;
   private flushPromise: Promise<void> | null = null;
   private flushResolve: (() => void) | null = null;
@@ -50,16 +50,26 @@ export class CameraAccessory {
         ? camera.recordingSettings.enableMotionDetection
         : true;
     this.isMotionEnabled = motionEnabled;
+    // The switch shows Protect's current smart detection, including a camera
+    // discovered with it already off. That does not save an empty snapshot.
+    this.isSmartDetectEnabled = smartDetectConfigActive(readSmartDetectConfig(camera));
 
     this.configureAccessoryInformation(camera);
     this.motionSensor = this.configureMotionSensor();
     this.motionSwitch = this.configureMotionSwitch();
     this.ledSwitch = this.configureLedSwitch();
+    this.smartSwitch = this.platform.showSmartDetection !== false ? this.configureSmartDetectSwitch() : null;
+    if (this.platform.showSmartDetection === false) {
+      this.removeSmartDetectSwitch();
+    }
 
     // Set initial values
     this.updateMotionSensorState(false);
     this.updateMotionSwitchState(motionEnabled);
     this.updateLedSwitchState(this.ledEnabled);
+    if (this.smartSwitch) {
+      this.updateSmartSwitchState(this.isSmartDetectEnabled);
+    }
   }
 
   private get camera(): ProtectCamera {
@@ -78,24 +88,21 @@ export class CameraAccessory {
     return this.isMotionEnabled;
   }
 
-  public get savedSmartDetectPreferences(): SmartDetectPreferences | null {
-    return this.smartDetectPreferences;
+  /** Null when the Smart Detection switch is hidden. */
+  public get smartDetectState(): boolean | null {
+    return this.smartSwitch ? this.isSmartDetectEnabled : null;
   }
 
   public get savedSmartDetectConfig(): SmartDetectConfig | null {
     return this.smartDetectConfig;
   }
 
-  private get smartDetectPreferences(): SmartDetectPreferences | null {
-    const stored = this.accessory.context.smartDetectPreferences as SmartDetectPreferences | undefined;
-    if (!stored) {
-      return null;
-    }
-    return stored;
+  private get isSmartDetectEnabled(): boolean {
+    return this.accessory.context.smartDetectEnabled ?? false;
   }
 
-  private set smartDetectPreferences(value: SmartDetectPreferences | null) {
-    this.accessory.context.smartDetectPreferences = value;
+  private set isSmartDetectEnabled(value: boolean) {
+    this.accessory.context.smartDetectEnabled = value;
   }
 
   private get smartDetectConfig(): SmartDetectConfig | null {
@@ -143,6 +150,27 @@ export class CameraAccessory {
     return service;
   }
 
+  private configureSmartDetectSwitch(): Service {
+    const service = this.getOrAddService(this.platform.Service.Switch, 'Smart Detection', 'smart-detect-switch');
+
+    service.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
+    service.setCharacteristic(this.platform.Characteristic.ConfiguredName, 'Smart Detection');
+
+    service
+      .getCharacteristic(this.platform.Characteristic.On)
+      .onGet(() => this.isSmartDetectEnabled)
+      .onSet(this.setSmartDetectEnabled.bind(this));
+
+    return service;
+  }
+
+  private removeSmartDetectSwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'smart-detect-switch');
+    if (existing && this.accessory.removeService) {
+      this.accessory.removeService(existing);
+    }
+  }
+
   private configureLedSwitch(): Service {
     const service = this.getOrAddService(this.platform.Service.Switch, 'Status LED', 'led-switch');
 
@@ -180,10 +208,15 @@ export class CameraAccessory {
     return this.scheduleFlush();
   }
 
+  private setSmartDetectEnabled(value: CharacteristicValue): Promise<void> {
+    this.pendingSmart = value as boolean;
+    return this.scheduleFlush();
+  }
+
   /**
    * Opens (or joins) a short coalescing window and returns a promise HomeKit awaits.
-   * The first pending change starts the window; further changes on either switch
-   * within it share the same flush.
+   * The first pending change starts the window; further changes on any switch
+   * within it share the same flush and the same serialized camera write.
    */
   private scheduleFlush(): Promise<void> {
     if (!this.flushPromise) {
@@ -201,51 +234,58 @@ export class CameraAccessory {
     const resolve = this.flushResolve;
     const led = this.pendingLed;
     const motion = this.pendingMotion;
+    const smart = this.pendingSmart;
     this.flushTimer = null;
     this.flushPromise = null;
     this.flushResolve = null;
     this.pendingLed = undefined;
     this.pendingMotion = undefined;
+    this.pendingSmart = undefined;
 
     // Only send settings that actually differ from the current state. HomeKit
     // re-syncs and scenes routinely set the value that is already active.
-    const settings: { led?: boolean; motion?: boolean } = {};
+    const settings: { led?: boolean; motion?: boolean; smartDetect?: boolean } = {};
     if (led !== undefined && led !== this.ledEnabled) {
       settings.led = led;
     }
     if (motion !== undefined && motion !== this.isMotionEnabled) {
       settings.motion = motion;
     }
+    if (smart !== undefined && smart !== this.isSmartDetectEnabled) {
+      settings.smartDetect = smart;
+    }
 
     try {
-      if (settings.led === undefined && settings.motion === undefined) {
+      if (settings.led === undefined && settings.motion === undefined && settings.smartDetect === undefined) {
         return;
       }
 
       this.platform.debugLog(`Applying settings for ${this.camera.name}: ${JSON.stringify(settings)}`);
       const outcome = await this.client.updateCameraSettings(this.camera, {
         ...settings,
-        smartDetectPreferences: settings.motion !== undefined ? this.smartDetectPreferences : undefined,
-        smartDetectConfig: settings.motion !== undefined ? this.smartDetectConfig : undefined,
+        smartDetectConfig: settings.smartDetect !== undefined ? this.smartDetectConfig : undefined,
       });
-      if (settings.motion !== undefined && outcome.smartDetectConfig) {
+      if (settings.smartDetect !== undefined && outcome.smartDetectConfig) {
         this.smartDetectConfig = outcome.smartDetectConfig;
       }
-      if (settings.motion !== undefined && outcome.smartDetectPreferences) {
-        this.smartDetectPreferences = outcome.smartDetectPreferences;
-      }
 
-      if (outcome.result === 'ok') {
+      const controlsRequested = settings.led !== undefined || settings.motion !== undefined;
+      if (!controlsRequested || outcome.result === 'ok') {
         this.applySettings(settings);
       } else {
         this.revertSettings(settings, outcome.result);
+      }
+      if (settings.smartDetect !== undefined && outcome.smartDetectResult !== 'ok') {
+        this.revertSmartDetect(outcome.smartDetectResult ?? 'failed');
+      } else if (settings.smartDetect !== undefined && outcome.smartDetectResult === 'ok') {
+        this.isSmartDetectEnabled = settings.smartDetect;
       }
     } finally {
       resolve?.();
     }
   }
 
-  private applySettings(settings: { led?: boolean; motion?: boolean }): void {
+  private applySettings(settings: { led?: boolean; motion?: boolean; smartDetect?: boolean }): void {
     if (settings.led !== undefined) {
       this.ledEnabled = settings.led;
     }
@@ -260,7 +300,17 @@ export class CameraAccessory {
     }
   }
 
-  private revertSettings(settings: { led?: boolean; motion?: boolean }, result: UpdateResult): void {
+  private revertSmartDetect(result: UpdateResult): void {
+    this.warnUpdateFailure('smart detection', result);
+    setTimeout(() => {
+      this.smartSwitch?.updateCharacteristic(this.platform.Characteristic.On, this.isSmartDetectEnabled);
+    }, 100);
+  }
+
+  private revertSettings(
+    settings: { led?: boolean; motion?: boolean; smartDetect?: boolean },
+    result: UpdateResult,
+  ): void {
     const labels: string[] = [];
     if (settings.led !== undefined) {
       labels.push('LED');
@@ -375,12 +425,23 @@ export class CameraAccessory {
     }
   }
 
-  public handleSmartDetectSettingsUpdate(settings: SmartDetectSettings): void {
-    this.smartDetectPreferences = observeSmartDetectPreferences(
-      this.smartDetectPreferences,
-      settings,
-      this.isMotionEnabled,
-    );
+  public handleSmartDetectUpdate(partial: Partial<ProtectCamera>): void {
+    const current = this.camera;
+    const merged: ProtectCamera = { ...current, ...partial };
+    if (partial.smartDetectSettings) {
+      merged.smartDetectSettings = { ...current.smartDetectSettings, ...partial.smartDetectSettings };
+    }
+    this.accessory.context.camera = merged;
+    if (!this.smartSwitch) {
+      return;
+    }
+    const active = smartDetectConfigActive(readSmartDetectConfig(merged));
+    this.isSmartDetectEnabled = active;
+    this.updateSmartSwitchState(active);
+  }
+
+  private updateSmartSwitchState(enabled: boolean): void {
+    this.smartSwitch?.updateCharacteristic(this.platform.Characteristic.On, enabled);
   }
 
   private updateMotionSwitchState(enabled: boolean): void {

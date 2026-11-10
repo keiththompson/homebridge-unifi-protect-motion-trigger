@@ -41,20 +41,30 @@ function outcome(
   result: UpdateOutcome['result'],
   preferences: UpdateOutcome['smartDetectPreferences'] = null,
 ): UpdateOutcome {
-  return { result, smartDetectPreferences: preferences, smartDetectConfig: null };
+  return { result, smartDetectResult: null, smartDetectPreferences: preferences, smartDetectConfig: null };
+}
+
+function namedSwitch(
+  accessory: PlatformAccessory,
+  subtype: string,
+): Characteristic & {
+  invokeGet: () => unknown;
+  invokeSet: (value: unknown) => unknown;
+} {
+  const service = (
+    accessory as PlatformAccessory & { getServiceBySubtype: (subtype: string) => Service }
+  ).getServiceBySubtype(subtype);
+  return service.getCharacteristic('On' as unknown as never) as Characteristic & {
+    invokeGet: () => unknown;
+    invokeSet: (value: unknown) => unknown;
+  };
 }
 
 function motionSwitch(accessory: PlatformAccessory): Characteristic & {
   invokeGet: () => unknown;
   invokeSet: (value: unknown) => unknown;
 } {
-  const service = (
-    accessory as PlatformAccessory & { getServiceBySubtype: (subtype: string) => Service }
-  ).getServiceBySubtype('motion-switch');
-  return service.getCharacteristic('On' as unknown as never) as Characteristic & {
-    invokeGet: () => unknown;
-    invokeSet: (value: unknown) => unknown;
-  };
+  return namedSwitch(accessory, 'motion-switch');
 }
 
 describe('CameraAccessory motion lifecycle', () => {
@@ -94,31 +104,22 @@ describe('CameraAccessory motion lifecycle', () => {
 
     expect(client.updateCameraSettings).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'cam1' }),
-      expect.objectContaining({
-        motion: false,
-        smartDetectPreferences: {
-          objectTypes: ['person'],
-          audioTypes: [],
-          autoTrackingObjectTypes: [],
-        },
-      }),
+      expect.objectContaining({ motion: false }),
+    );
+    expect(client.updateCameraSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cam1' }),
+      expect.not.objectContaining({ smartDetect: expect.anything() }),
     );
     expect(cameraAccessory.motionEnabledState).toBe(true);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('readback does not match'));
   });
 
-  it('applies a confirmed disable and keeps the smart detection snapshot', async () => {
+  it('keeps a confirmed motion change from changing smart detection', async () => {
     vi.useFakeTimers();
     const accessory = createMockAccessory('Front Door', 'uuid-1');
     accessory.context.camera = camera(true);
     const client = {
-      updateCameraSettings: vi.fn().mockResolvedValue(
-        outcome('ok', {
-          objectTypes: ['person'],
-          audioTypes: [],
-          autoTrackingObjectTypes: [],
-        }),
-      ),
+      updateCameraSettings: vi.fn().mockResolvedValue(outcome('ok')),
     } as unknown as ProtectClient;
     const cameraAccessory = new CameraAccessory(platform(), accessory, client, 10);
 
@@ -127,11 +128,7 @@ describe('CameraAccessory motion lifecycle', () => {
     await pending;
 
     expect(cameraAccessory.motionEnabledState).toBe(false);
-    expect(cameraAccessory.savedSmartDetectPreferences).toEqual({
-      objectTypes: ['person'],
-      audioTypes: [],
-      autoTrackingObjectTypes: [],
-    });
+    expect(cameraAccessory.smartDetectState).toBe(true);
   });
 
   it('follows Create Motion Events events and ignores sensor motionSettings', () => {
@@ -141,9 +138,44 @@ describe('CameraAccessory motion lifecycle', () => {
 
     cameraAccessory.handleCreateMotionEventsUpdate(false);
     expect(cameraAccessory.motionEnabledState).toBe(false);
+    expect(cameraAccessory.smartDetectState).toBe(true);
 
-    cameraAccessory.handleSmartDetectSettingsUpdate({ objectTypes: [], audioTypes: ['siren'] });
-    expect(cameraAccessory.savedSmartDetectPreferences?.objectTypes).toEqual([]);
-    expect(cameraAccessory.savedSmartDetectPreferences?.audioTypes).toEqual(['siren']);
+    cameraAccessory.handleSmartDetectUpdate({
+      smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
+    });
+    expect(cameraAccessory.smartDetectState).toBe(false);
+    expect(cameraAccessory.motionEnabledState).toBe(false);
+  });
+
+  it('sends Motion Enabled and Smart Detection together when a scene flips both', async () => {
+    vi.useFakeTimers();
+    const accessory = createMockAccessory('Front Door', 'uuid-1');
+    accessory.context.camera = camera(true);
+    const client = {
+      updateCameraSettings: vi.fn().mockResolvedValue({ ...outcome('ok'), smartDetectResult: 'ok' }),
+    } as unknown as ProtectClient;
+    new CameraAccessory(platform(), accessory, client, 10);
+
+    const pendingMotion = motionSwitch(accessory).invokeSet(false);
+    const pendingSmart = namedSwitch(accessory, 'smart-detect-switch').invokeSet(false);
+    await vi.advanceTimersByTimeAsync(50);
+    await Promise.all([pendingMotion, pendingSmart]);
+
+    expect(client.updateCameraSettings).toHaveBeenCalledTimes(1);
+    expect(client.updateCameraSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cam1' }),
+      expect.objectContaining({ motion: false, smartDetect: false }),
+    );
+  });
+
+  it('seeds the Smart Detection switch off when the camera is already off', () => {
+    const accessory = createMockAccessory('Front Door', 'uuid-1');
+    const off = camera(true);
+    off.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
+    accessory.context.camera = off;
+    const cameraAccessory = new CameraAccessory(platform(), accessory, {} as ProtectClient, 10);
+
+    expect(cameraAccessory.smartDetectState).toBe(false);
+    expect(cameraAccessory.savedSmartDetectConfig).toBeNull();
   });
 });

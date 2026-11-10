@@ -1,12 +1,9 @@
-import type { SmartDetectConfig, SmartDetectPatch } from './smart-detect.js';
+import type { SmartDetectConfig } from './smart-detect.js';
 import {
-  cloneSmartDetectConfig,
   disableSmartDetect,
   preferencesFromConfig,
   readSmartDetectConfig,
-  retainSmartDetectSnapshot,
   smartDetectConfigActive,
-  smartDetectPatch,
   smartDetectStateMatches,
 } from './smart-detect.js';
 import type { ProtectCamera, SmartDetectPreferences, SmartDetectSettings } from './types.js';
@@ -33,18 +30,7 @@ export interface MotionDiagnostics {
 export interface MotionWritePlan {
   payload: {
     recordingSettings: { enableMotionDetection: boolean };
-  } & SmartDetectPatch;
-  /** Type lists to keep so a later enable can restore what was cleared. */
-  preferences: SmartDetectPreferences | null;
-  /** Full pre-disable snapshot. Null when there is nothing active to restore. */
-  config: SmartDetectConfig | null;
-  /**
-   * Lists the next camera read must show.
-   * Null when this write did not have a smart-detection record to compare.
-   */
-  expectedSmartDetect: SmartDetectPreferences | null;
-  /** Full smart-detection state the next camera read must show, including zones. */
-  expectedConfig: SmartDetectConfig | null;
+  };
 }
 
 export interface MotionReadbackExpectation {
@@ -115,61 +101,12 @@ export function readMotionDiagnostics(camera: ProtectCamera): MotionDiagnostics 
 }
 
 /**
- * Builds the camera PATCH for a motion toggle.
- *
+ * Builds the camera PATCH for the Motion Enabled switch.
  * Create Motion Events is `recordingSettings.enableMotionDetection`.
- * Smart detection has no enable flag. Disabling clears object, audio, and
- * auto-tracking lists and each zone's `objectTypes`, and keeps the caller's
- * snapshot for restore. Enabling writes that snapshot back exactly.
+ * This switch does not change smart detection.
  */
-export function planMotionWrite(
-  enabled: boolean,
-  camera: ProtectCamera | null,
-  saved: SmartDetectConfig | null,
-): MotionWritePlan {
-  const recordingSettings = { enableMotionDetection: enabled };
-  const live = camera ? readSmartDetectConfig(camera) : null;
-  const snapshot = enabled
-    ? saved && smartDetectConfigActive(saved)
-      ? cloneSmartDetectConfig(saved)
-      : null
-    : retainSmartDetectSnapshot(saved, live);
-  const kept = basePlan(recordingSettings, snapshot);
-
-  if (!live) {
-    return kept;
-  }
-
-  if (!enabled) {
-    if (!smartDetectConfigActive(live)) {
-      const disabled = disableSmartDetect(live);
-      return {
-        ...kept,
-        expectedSmartDetect: live.settingsPresent ? preferencesFromConfig(disabled) : null,
-        expectedConfig: hasSmartDetectRecord(live) ? disabled : null,
-      };
-    }
-    const disabled = disableSmartDetect(live);
-    return {
-      payload: { recordingSettings, ...smartDetectPatch(live, 'disable') },
-      preferences: preferencesFromConfig(snapshot),
-      config: snapshot,
-      expectedSmartDetect: disabled.settingsPresent ? preferencesFromConfig(disabled) : null,
-      expectedConfig: disabled,
-    };
-  }
-
-  if (!snapshot) {
-    return kept;
-  }
-
-  return {
-    payload: { recordingSettings, ...smartDetectPatch(snapshot, 'restore') },
-    preferences: preferencesFromConfig(snapshot),
-    config: snapshot,
-    expectedSmartDetect: snapshot.settingsPresent ? preferencesFromConfig(snapshot) : null,
-    expectedConfig: snapshot,
-  };
+export function planMotionWrite(enabled: boolean): MotionWritePlan {
+  return { payload: { recordingSettings: { enableMotionDetection: enabled } } };
 }
 
 export function motionReadbackMatches(camera: ProtectCamera, expected: MotionReadbackExpectation): boolean {
@@ -202,76 +139,55 @@ export function motionReadbackMatches(camera: ProtectCamera, expected: MotionRea
 }
 
 /**
- * True when the HomeKit switch and the last camera read disagree.
- * While the switch is off, any remaining smart-detection type (settings or zone)
- * is drift. While it is on, drift is a saved snapshot that was not restored.
+ * True when the Motion Enabled switch and the last camera read disagree.
+ * Smart detection has its own switch and is not part of this comparison.
  * A missing flag yields null rather than a guess.
  */
 export function motionDrift(
   intendedMotionEnabled: boolean | null,
-  diagnostics:
-    | (Pick<MotionDiagnostics, 'createMotionEvents' | 'smartDetect'> & {
-        smartDetectConfig?: SmartDetectConfig | null;
-      })
-    | null,
-  saved: SmartDetectConfig | null = null,
+  diagnostics: Pick<MotionDiagnostics, 'createMotionEvents'> | null,
 ): boolean | null {
   if (intendedMotionEnabled === null || !diagnostics || diagnostics.createMotionEvents === null) {
     return null;
   }
 
-  if (diagnostics.createMotionEvents !== intendedMotionEnabled) {
-    return true;
-  }
-
-  const smart = smartDetectDrift(intendedMotionEnabled, diagnostics.smartDetectConfig, diagnostics.smartDetect, saved);
-  return smart === true;
+  return diagnostics.createMotionEvents !== intendedMotionEnabled;
 }
 
 /**
- * Smart-detection portion of drift. Null when the camera read did not include
- * smart detection and a comparison was required.
+ * True when the Smart Detection switch and the last camera read disagree.
+ * Null when the switch state or the camera read is unknown.
  */
 export function smartDetectDrift(
-  intendedMotionEnabled: boolean | null,
+  intendedSmartDetect: boolean | null,
   actual: SmartDetectConfig | null | undefined,
-  actualLists: SmartDetectPreferences | null | undefined,
   saved: SmartDetectConfig | null,
 ): boolean | null {
-  if (intendedMotionEnabled === null) {
+  if (intendedSmartDetect === null || !actual) {
     return null;
   }
 
-  if (intendedMotionEnabled === false) {
-    if (actual) {
-      if (smartDetectConfigActive(actual)) {
-        return true;
-      }
-      if (saved && smartDetectConfigActive(saved)) {
-        return !smartDetectStateMatches(disableSmartDetect(saved), actual);
-      }
-      return false;
+  if (!intendedSmartDetect) {
+    if (smartDetectConfigActive(actual)) {
+      return true;
     }
-    if (actualLists) {
-      return SMART_DETECT_LIST_KEYS.some((key) => actualLists[key].length > 0);
+    if (saved && smartDetectConfigActive(saved)) {
+      return !smartDetectStateMatches(disableSmartDetect(saved), actual);
     }
-    return null;
+    return false;
   }
 
   if (saved && smartDetectConfigActive(saved)) {
-    if (!actual) {
-      return null;
-    }
     return !smartDetectStateMatches(saved, actual);
   }
 
-  return null;
+  return !smartDetectConfigActive(actual);
 }
 
 /**
- * Updates the restore snapshot from a controller event.
- * While motion is off, an empty list is the suppressed state and must not erase
- * the types saved for re-enable. Keys omitted from the event are left alone.
+ * Updates saved type lists from a controller event.
+ * While the Smart Detection switch is off, an empty list is the cleared state
+ * and must not erase the types saved for restore. Keys omitted from the event are left alone.
  */
 export function observeSmartDetectPreferences(
   saved: SmartDetectPreferences | null,
@@ -302,23 +218,6 @@ export function observeSmartDetectPreferences(
   }
 
   return smartDetectPreferencesSaved(next) ? next : null;
-}
-
-function basePlan(
-  recordingSettings: { enableMotionDetection: boolean },
-  snapshot: SmartDetectConfig | null,
-): MotionWritePlan {
-  return {
-    payload: { recordingSettings },
-    preferences: preferencesFromConfig(snapshot),
-    config: snapshot,
-    expectedSmartDetect: null,
-    expectedConfig: null,
-  };
-}
-
-function hasSmartDetectRecord(config: SmartDetectConfig): boolean {
-  return config.settingsPresent || config.zones !== null || config.secondLensZones !== null;
 }
 
 function readMotionSettings(settings: ProtectCamera['motionSettings']): null | { isEnabled: boolean | null } {

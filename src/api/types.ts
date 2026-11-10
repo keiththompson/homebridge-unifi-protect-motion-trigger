@@ -82,11 +82,16 @@ export type UpdateResult = 'ok' | 'mismatch' | 'throttled' | 'unauthorized' | 'f
 
 export interface UpdateOutcome {
   result: UpdateResult;
-  /** Smart-detection type lists to persist for a later re-enable. Null when there is nothing to restore. */
+  /**
+   * Result of a Smart Detection switch write. Null when that switch was not part of the request.
+   * Motion and LED use `result`, so one can succeed when the other does not.
+   */
+  smartDetectResult: UpdateResult | null;
+  /** Type lists from the saved smart-detection snapshot. Null when there is nothing to restore. */
   smartDetectPreferences: SmartDetectPreferences | null;
   /**
-   * Full pre-disable snapshot, including zones. Null when there is nothing to restore.
-   * Inactive (already disabled) configs are not returned here.
+   * Full snapshot saved before smart detection was turned off, including zones.
+   * Null when there is nothing to restore. An already-disabled config is not returned here.
    */
   smartDetectConfig: SmartDetectConfig | null;
 }

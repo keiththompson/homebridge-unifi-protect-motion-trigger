@@ -23,16 +23,24 @@ interface SnapshotFile {
   cameras: StoredCamera[];
 }
 
+export interface SnapshotStoreLogger {
+  warn(message: string): void;
+}
+
 /**
  * Durable per-camera smart-detection snapshots in the Homebridge storage directory.
- * Writes are synchronous and atomic so a crash after shields go down can still restore.
- * An already-disabled config never replaces an active snapshot.
+ * Writes are synchronous and atomic so a restart while the Smart Detection switch
+ * is off can still restore. An already-disabled config never replaces an active snapshot.
  */
 export class SmartDetectSnapshotStore {
   private loadedFrom: string | null = null;
+  private loadErrorLogged = false;
   private readonly cameras = new Map<string, StoredCamera>();
 
-  constructor(private readonly directory: () => string | undefined) {}
+  constructor(
+    private readonly directory: () => string | undefined,
+    private readonly log?: SnapshotStoreLogger,
+  ) {}
 
   public get(controllerAddress: string, cameraId: string): SmartDetectConfig | null {
     this.ensureLoaded();
@@ -79,32 +87,47 @@ export class SmartDetectSnapshotStore {
     if (this.loadedFrom === dir) {
       return;
     }
-    this.cameras.clear();
-    this.loadedFrom = dir;
     if (!dir) {
+      this.loadedFrom = dir;
       return;
     }
     const path = join(dir, SMART_DETECT_SNAPSHOT_FILENAME);
     let parsed: unknown;
     try {
       parsed = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        this.cameras.clear();
+        this.loadedFrom = dir;
+        this.loadErrorLogged = false;
+        return;
+      }
+      this.warnUnreadable(error instanceof Error ? error.message : 'unreadable snapshot file');
       return;
     }
-    if (!parsed || typeof parsed !== 'object') {
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { cameras?: unknown }).cameras)) {
+      this.warnUnreadable('snapshot file is not a smart detection snapshot');
       return;
     }
-    const cameras = (parsed as { cameras?: unknown }).cameras;
-    if (!Array.isArray(cameras)) {
-      return;
-    }
-    for (const entry of cameras) {
+    this.cameras.clear();
+    for (const entry of (parsed as { cameras: unknown[] }).cameras) {
       const stored = sanitizeEntry(entry);
       if (!stored) {
         continue;
       }
       this.cameras.set(storageKey(stored.controllerAddress, stored.cameraId), stored);
     }
+    this.loadedFrom = dir;
+    this.loadErrorLogged = false;
+  }
+
+  private warnUnreadable(message: string): void {
+    if (this.loadErrorLogged) {
+      return;
+    }
+    this.loadErrorLogged = true;
+    this.log?.warn(`Could not read saved smart detection snapshots (${message}). The next attempt will try again.`);
   }
 
   private flush(): void {
