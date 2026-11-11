@@ -3,11 +3,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { PlatformAccessory, Service } from 'homebridge';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ProtectMotionPlatform } from './platform.js';
 import { HEALTH_FILENAME } from './settings.js';
 import { createMockAPI, createMockConfig, createMockLogger } from './test/mocks.js';
+
+const openPlatforms: Array<{ emit: (event: string) => void }> = [];
+
+function createdApi(options?: { storagePath: string }): ReturnType<typeof createMockAPI> {
+  const hap = options ? createMockAPI(options) : createMockAPI();
+  openPlatforms.push(hap as unknown as { emit: (event: string) => void });
+  return hap;
+}
+
+afterEach(() => {
+  for (const hap of openPlatforms) {
+    hap.emit('shutdown');
+  }
+  openPlatforms.length = 0;
+});
 
 const apiState = vi.hoisted(() => {
   const listeners = new Map<string, (packet: unknown) => void>();
@@ -30,15 +45,25 @@ const apiState = vi.hoisted(() => {
   return {
     listeners,
     camera,
+    sessionUp: true,
+    admin: true,
     login: vi.fn(async (_address: string, _username: string, _password: string) => true),
     api: {
       login: (address: string, username: string, password: string) => apiState.login(address, username, password),
-      getBootstrap: vi.fn(async () => true),
+      getBootstrap: vi.fn(async () => {
+        apiState.sessionUp = true;
+        return true;
+      }),
       get bootstrap() {
-        return { cameras: [apiState.camera], lastUpdateId: '1' };
+        return apiState.sessionUp ? { cameras: [apiState.camera], lastUpdateId: '1' } : null;
       },
       isThrottled: false,
-      isAdminUser: true,
+      get isAdminUser() {
+        return apiState.sessionUp && apiState.admin;
+      },
+      get _eventsWs() {
+        return apiState.sessionUp ? { readyState: 1 } : null;
+      },
       updateDevice: vi.fn(async () => apiState.camera),
       getApiEndpoint: vi.fn(() => 'https://nvr.example/proxy/protect/api/cameras'),
       retrieve: vi.fn(async () => ({
@@ -69,6 +94,8 @@ function switchValue(accessory: PlatformAccessory): unknown {
 describe('ProtectMotionPlatform health', () => {
   beforeEach(() => {
     apiState.listeners.clear();
+    apiState.sessionUp = true;
+    apiState.admin = true;
     apiState.login.mockResolvedValue(true);
     apiState.camera.recordingSettings.enableMotionDetection = true;
     apiState.camera.motionSettings = null;
@@ -80,7 +107,7 @@ describe('ProtectMotionPlatform health', () => {
   });
 
   it('reports effective motion state without credentials and ignores sensor motionSettings', async () => {
-    const hap = createMockAPI();
+    const hap = createdApi();
     const platform = new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -147,7 +174,7 @@ describe('ProtectMotionPlatform health', () => {
 
   it('records an authentication failure without the password', async () => {
     apiState.login.mockResolvedValue(false);
-    const hap = createMockAPI();
+    const hap = createdApi();
     const platform = new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -172,6 +199,8 @@ describe('ProtectMotionPlatform health', () => {
 describe('ProtectMotionPlatform health file', () => {
   beforeEach(() => {
     apiState.listeners.clear();
+    apiState.sessionUp = true;
+    apiState.admin = true;
     apiState.login.mockResolvedValue(true);
     apiState.camera.recordingSettings.enableMotionDetection = true;
     apiState.camera.motionSettings = null;
@@ -184,7 +213,7 @@ describe('ProtectMotionPlatform health file', () => {
 
   it('writes a home-monitor-compatible snapshot after bootstrap and marks disconnect on shutdown', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-health-platform-'));
-    const hap = createMockAPI({ storagePath: dir });
+    const hap = createdApi({ storagePath: dir });
     new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -234,5 +263,76 @@ describe('ProtectMotionPlatform health file', () => {
       const after = JSON.parse(readFileSync(file, 'utf8')) as typeof parsed;
       expect(after.controllers[0]?.connected).toBe(false);
     });
+  });
+
+  it('keeps camera health when the Protect session is lost and clears it after recovery', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-health-session-'));
+    const hap = createdApi({ storagePath: dir });
+    const platform = new ProtectMotionPlatform(
+      createMockLogger(),
+      createMockConfig({
+        controllers: [{ address: '10.0.0.5', username: 'homebridge-user', password: 'super-secret-password' }],
+      }),
+      hap,
+    );
+
+    (hap as unknown as { emit: (event: string) => void }).emit('didFinishLaunching');
+    const file = join(dir, HEALTH_FILENAME);
+    await vi.waitFor(() => {
+      expect(existsSync(file)).toBe(true);
+    });
+
+    apiState.sessionUp = false;
+    const lost = await platform.getHealth();
+    expect(lost.schemaVersion).toBe('1.2.0');
+    expect(lost.controllers[0]?.connected).toBe(false);
+    expect(lost.controllers[0]?.admin).toBeNull();
+    expect(lost.controllers[0]?.lastError).toBe('protect session lost');
+    expect(lost.controllers[0]?.cameras).toHaveLength(1);
+    expect(lost.controllers[0]?.cameras[0]).toMatchObject({
+      id: 'cam1',
+      name: 'Front Door',
+      smartDetectObjectTypes: ['person'],
+    });
+    const stillLost = await platform.getHealth();
+    expect(stillLost.controllers[0]?.lastError).toBe('protect session lost');
+
+    apiState.listeners.get('message')?.({
+      action: { action: 'update', modelKey: 'camera', id: 'cam1' },
+      payload: { recordingSettings: { enableMotionDetection: true } },
+    });
+    await vi.waitFor(() => {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+        schemaVersion: string;
+        updatedAtEpoch: number;
+        controllers: Array<{
+          connected: boolean;
+          admin: boolean | null;
+          lastError: string | null;
+          reconnecting: boolean;
+          consecutiveFailures: number;
+          cameras: number;
+          cameraHealth: Array<{ id: string; smartDetectObjectTypes: string[] | null }>;
+        }>;
+      };
+      expect(parsed.schemaVersion).toBe('1.2.0');
+      expect(typeof parsed.updatedAtEpoch).toBe('number');
+      expect(parsed.controllers[0]?.connected).toBe(false);
+      expect(parsed.controllers[0]?.admin).toBeNull();
+      expect(parsed.controllers[0]?.lastError).toBe('protect session lost');
+      expect(parsed.controllers[0]?.reconnecting).toBe(true);
+      expect(parsed.controllers[0]?.consecutiveFailures).toBe(1);
+      expect(parsed.controllers[0]?.cameras).toBe(1);
+      expect(parsed.controllers[0]?.cameraHealth).toHaveLength(1);
+      expect(parsed.controllers[0]?.cameraHealth[0]?.smartDetectObjectTypes).toEqual(['person']);
+    });
+
+    apiState.sessionUp = true;
+    apiState.admin = true;
+    const restored = await platform.getHealth();
+    expect(restored.controllers[0]?.connected).toBe(true);
+    expect(restored.controllers[0]?.admin).toBe(true);
+    expect(restored.controllers[0]?.lastError).toBeNull();
+    expect(restored.controllers[0]?.cameras).toHaveLength(1);
   });
 });

@@ -16,9 +16,16 @@ import { HEALTH_FILENAME } from './settings.js';
 /**
  * Health document.
  * 1.1.0 added readback and drift. 1.2.0 adds smart-detection expected, actual,
- * and drift on each camera. Older fields are unchanged.
+ * and drift on each camera. A lost Protect session reuses `connected` and
+ * `lastError`; no fields were added.
  */
 export const HEALTH_SCHEMA_VERSION = '1.2.0' as const;
+
+/**
+ * Fixed phrase for a login that previously succeeded and then lost its bootstrap
+ * or events websocket. Never a credential, username, or raw controller body.
+ */
+export const HEALTH_SESSION_LOST_ERROR = 'protect session lost';
 
 /** A read older than this is stale. Callers can refresh before trusting it. */
 export const HEALTH_READBACK_STALE_MS = 5 * 60 * 1000;
