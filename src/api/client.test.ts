@@ -8,7 +8,7 @@ import { buildHealthReport } from '../health.js';
 import { SMART_DETECT_SNAPSHOT_FILENAME } from '../settings.js';
 import { SmartDetectSnapshotStore } from '../smart-detect-store.js';
 import { createMockLogger } from '../test/mocks.js';
-import { ProtectClient, SESSION_WATCHDOG_BASE_MS } from './client.js';
+import { EVENTS_SOCKET_GRACE_MS, ProtectClient, SESSION_WATCHDOG_BASE_MS, SESSION_WATCHDOG_MAX_MS } from './client.js';
 import type { ProtectCamera, SmartDetectPreferences } from './types.js';
 
 interface CameraStore {
@@ -1015,7 +1015,7 @@ describe('Protect session recovery', () => {
     }
   });
 
-  it('refreshes the session at most twice when every write loses it again', async () => {
+  it('refreshes the session once when every write in one update loses it again', async () => {
     store = zonedCamera(
       'cam1',
       'Front Door',
@@ -1044,33 +1044,79 @@ describe('Protect session recovery', () => {
 
     await client.updateCameraSettings(camera, { motion: false, smartDetect: false });
 
-    expect(apiState.getBootstrap).toHaveBeenCalledTimes(2);
+    expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
+    expect(apiState.updateDevice.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it('closes a socket the library opens after disconnect', async () => {
+  it('closes a socket the library opens after disconnect and does not restart the watchdog', async () => {
+    vi.useFakeTimers();
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
     const client = new ProtectClient(createMockLogger(), { sleep: async () => undefined });
-    await client.connect('10.0.0.5', 'stored-user', 'stored-password');
-    apiState.reset.mockClear();
-    apiState.getBootstrap = vi.fn(async () => {
-      await gate;
-      apiState.bootstrap = { cameras: [store], lastUpdateId: '3' };
-      apiState.isAdminUser = true;
-      apiState.eventsWs = { readyState: 1 };
-      return true;
+    try {
+      await client.connect('10.0.0.5', 'stored-user', 'stored-password');
+      apiState.reset.mockClear();
+      apiState.getBootstrap.mockClear();
+      apiState.reset = vi.fn(() => {
+        apiState.eventsWs = null;
+        apiState.bootstrap = null;
+      });
+      apiState.getBootstrap = vi.fn(async () => {
+        await gate;
+        apiState.bootstrap = { cameras: [store], lastUpdateId: '3' };
+        apiState.isAdminUser = true;
+        apiState.eventsWs = { readyState: 1 };
+        return true;
+      });
+      loggedOutLibrary();
+
+      const pending = client.refreshCamera(camera);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
+      client.disconnect();
+      release();
+      await pending;
+
+      expect(apiState.eventsWs).toBeNull();
+      expect(apiState.reset).toHaveBeenCalledTimes(2);
+      expect(client.isConnected).toBe(false);
+      apiState.getBootstrap.mockClear();
+      await vi.advanceTimersByTimeAsync(SESSION_WATCHDOG_MAX_MS);
+      expect(apiState.getBootstrap).not.toHaveBeenCalled();
+    } finally {
+      client.disconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a live session through a short events-socket blip and reports a lost bootstrap immediately', async () => {
+    let now = 1_700_000_000_000;
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      now: () => now,
     });
-    loggedOutLibrary();
+    try {
+      await client.connect('10.0.0.5', 'stored-user', 'stored-password');
+      apiState.eventsWs = null;
+      expect(client.hasLiveSession).toBe(true);
 
-    const pending = client.refreshCamera(camera);
-    expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
-    client.disconnect();
-    release();
-    await pending;
+      now += EVENTS_SOCKET_GRACE_MS - 1;
+      expect(client.hasLiveSession).toBe(true);
+      apiState.eventsWs = { readyState: 1 };
+      expect(client.hasLiveSession).toBe(true);
 
-    expect(apiState.reset).toHaveBeenCalledTimes(2);
-    expect(client.isConnected).toBe(false);
+      apiState.eventsWs = null;
+      expect(client.hasLiveSession).toBe(true);
+      now += EVENTS_SOCKET_GRACE_MS;
+      expect(client.hasLiveSession).toBe(false);
+      expect(client.sessionLossError).toBe('protect session lost');
+
+      apiState.bootstrap = null;
+      apiState.eventsWs = { readyState: 1 };
+      expect(client.hasLiveSession).toBe(false);
+    } finally {
+      client.disconnect();
+    }
   });
 });

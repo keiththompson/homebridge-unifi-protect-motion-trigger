@@ -44,11 +44,17 @@ export const SESSION_WATCHDOG_BASE_MS = 3 * 60 * 1000;
 /** Longest delay between session recovery attempts after repeated failures. */
 export const SESSION_WATCHDOG_MAX_MS = 15 * 60 * 1000;
 
+/**
+ * A dropped events websocket stays "connected" until it has been down this long.
+ * A missing bootstrap is reported immediately.
+ */
+export const EVENTS_SOCKET_GRACE_MS = 30_000;
+
 /** Base delay before another login after a failed refresh. Doubles with each failure. */
 const RECOVERY_FAILURE_FLOOR_MS = 5_000;
 
-/** One settings update may refresh the session this many times. */
-const UPDATE_RECOVERY_BUDGET = 2;
+/** One settings update, including smart-detection fallbacks, may refresh the session once. */
+const UPDATE_RECOVERY_BUDGET = 1;
 
 /** WebSocket.OPEN. The unifi-protect events socket is private and only present while connected. */
 const WEBSOCKET_OPEN = 1;
@@ -114,6 +120,10 @@ export class ProtectClient {
   private adminConfirmed = false;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogDelayMs: number = SESSION_WATCHDOG_BASE_MS;
+  /** Set by disconnect so an in-flight bootstrap cannot reopen the socket or the watchdog. */
+  private stopped = false;
+  /** When the events socket was first observed down, while the bootstrap was still present. */
+  private eventsDownSince: number | null = null;
 
   constructor(
     private readonly log: Logging,
@@ -212,11 +222,16 @@ export class ProtectClient {
   }
 
   /**
-   * True when the controller bootstrap and realtime events websocket are both up.
-   * A logged-in non-admin still counts: logout clears the bootstrap and the socket.
+   * True when this login still has a bootstrap. A brief events-socket drop stays
+   * live until {@link EVENTS_SOCKET_GRACE_MS}. Logout clears the bootstrap and is
+   * not live immediately. A logged-in non-admin still counts.
    */
   public get hasLiveSession(): boolean {
-    return this.connected && this.hasBootstrap() && this.eventsWebsocketOpen();
+    if (!this.connected || !this.hasBootstrap()) {
+      this.eventsDownSince = null;
+      return false;
+    }
+    return this.eventsSocketTolerated();
   }
 
   /** True after a successful login whose bootstrap or events websocket later disappeared. */
@@ -616,6 +631,8 @@ export class ProtectClient {
   }
 
   public disconnect(): void {
+    this.stopped = true;
+    this.eventsDownSince = null;
     this.stopWatchdog();
     if (this.connected) {
       this.api.reset();
@@ -748,6 +765,19 @@ export class ProtectClient {
    * to null on logout or when the socket closes. Test doubles that omit the field are
    * treated as open so they are not refreshed on every check.
    */
+  /** A missing socket is tolerated until it has been down through the grace period. */
+  private eventsSocketTolerated(): boolean {
+    if (this.eventsWebsocketOpen()) {
+      this.eventsDownSince = null;
+      return true;
+    }
+    const observedAt = this.now();
+    if (this.eventsDownSince === null) {
+      this.eventsDownSince = observedAt;
+    }
+    return observedAt - this.eventsDownSince < EVENTS_SOCKET_GRACE_MS;
+  }
+
   private eventsWebsocketOpen(): boolean {
     const api: object = this.api;
     if (!Object.prototype.hasOwnProperty.call(api, '_eventsWs')) {
@@ -825,7 +855,7 @@ export class ProtectClient {
     if (this.recoveryInFlight) {
       return this.recoveryInFlight;
     }
-    if (!this.connected) {
+    if (this.stopped || !this.connected) {
       return Promise.resolve(false);
     }
     if (this.recoveryBlockedByBackoff()) {
@@ -847,15 +877,12 @@ export class ProtectClient {
     let restored = false;
     try {
       const ok = await this.api.getBootstrap();
-      if (!this.connected) {
-        // getBootstrap can open the events socket after disconnect() already reset it.
-        this.api.reset();
+      if (this.shutdownWon()) {
         return false;
       }
       restored = Boolean(ok && this.api.bootstrap);
     } catch (error) {
-      if (!this.connected) {
-        this.api.reset();
+      if (this.shutdownWon()) {
         return false;
       }
       this.log.error(`Unable to refresh the UniFi Protect bootstrap: ${errorText(error)}`);
@@ -867,7 +894,7 @@ export class ProtectClient {
       this.adminConfirmed = true;
       this.sessionRecoveredAt = this.now();
       this.watchdogDelayMs = SESSION_WATCHDOG_BASE_MS;
-      if (this.watchdogTimer) {
+      if (!this.stopped && this.watchdogTimer) {
         this.scheduleWatchdog();
       }
       this.log.info('UniFi Protect session restored.');
@@ -886,7 +913,21 @@ export class ProtectClient {
     this.scheduleWatchdog();
   }
 
+  /** True when disconnect already won. Closes anything the in-flight bootstrap reopened. */
+  private shutdownWon(): boolean {
+    if (!this.stopped && this.connected) {
+      return false;
+    }
+    this.stopWatchdog();
+    this.api.reset();
+    return true;
+  }
+
   private scheduleWatchdog(): void {
+    if (this.stopped || !this.connected) {
+      this.clearWatchdogTimer();
+      return;
+    }
     this.clearWatchdogTimer();
     const timer = setTimeout(() => {
       void this.onWatchdog();
@@ -909,7 +950,7 @@ export class ProtectClient {
   /** Recovers a missing bootstrap or events websocket so motion events resume without a write. */
   private async onWatchdog(): Promise<void> {
     this.watchdogTimer = null;
-    if (!this.connected) {
+    if (this.stopped || !this.connected) {
       return;
     }
     try {
@@ -933,7 +974,7 @@ export class ProtectClient {
       this.watchdogDelayMs = Math.min(this.watchdogDelayMs * 2, SESSION_WATCHDOG_MAX_MS);
       this.log.error(`Protect session watchdog failed: ${errorText(error)}`);
     }
-    if (this.connected) {
+    if (!this.stopped && this.connected) {
       this.scheduleWatchdog();
     }
   }
