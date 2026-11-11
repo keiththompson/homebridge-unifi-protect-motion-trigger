@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import {
   cloneSmartDetectConfig,
+  enforcedPlacesMatch,
   sanitizeSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectConfigActive,
@@ -320,9 +321,7 @@ function subtractEnforced(
 ): SmartDetectEnforcedType[] {
   const next: SmartDetectEnforcedType[] = [];
   for (const entry of current) {
-    const gone = absent.find(
-      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
-    );
+    const gone = absent.find((item) => enforcedPlacesMatch(item, entry));
     if (!gone) {
       next.push({ ...entry, types: [...entry.types] });
       continue;
@@ -342,9 +341,7 @@ function mergeEnforced(
 ): SmartDetectEnforcedType[] {
   const merged = current.map((entry) => ({ ...entry, types: [...entry.types] }));
   for (const entry of incoming) {
-    const existing = merged.find(
-      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
-    );
+    const existing = merged.find((item) => enforcedPlacesMatch(item, entry));
     if (!existing) {
       merged.push({ ...entry, types: [...entry.types].sort() });
       continue;
@@ -359,9 +356,7 @@ function enforcedEqual(left: SmartDetectEnforcedType[], right: SmartDetectEnforc
     return false;
   }
   return left.every((entry) => {
-    const other = right.find(
-      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
-    );
+    const other = right.find((item) => enforcedPlacesMatch(item, entry));
     if (!other || other.types.length !== entry.types.length) {
       return false;
     }

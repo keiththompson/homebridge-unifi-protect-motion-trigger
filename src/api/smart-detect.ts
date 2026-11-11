@@ -294,13 +294,13 @@ export function addedByController(
  * still remove them. They are not evidence of enforcement.
  */
 /**
- * A type that is still present after the clear, was not removed from any other
- * list, and was not in the previous snapshot. Another list must have cleared,
- * so an ignored write does not qualify. A zone that sticks while a sibling
- * zone in the same list clears is a partial apply, not enforcement.
+ * A type that is still present after the clear and was not removed from any
+ * other list. Another list must have cleared, so an ignored write does not
+ * qualify. A zone that sticks while a sibling zone in the same list clears is
+ * a partial apply, not enforcement. Ownership does not block this: a snapshot
+ * that already stored the type still drops it when the controller puts it back.
  */
 export function survivingUnownedTypes(
-  previous: SmartDetectConfig | null,
   beforeWrite: SmartDetectConfig,
   written: SmartDetectConfig,
   after: SmartDetectConfig,
@@ -316,12 +316,7 @@ export function survivingUnownedTypes(
     if (siblingZoneCleared(entry, beforeWrite, after)) {
       continue;
     }
-    const types = entry.types.filter((type) => {
-      if (clearedTypes.has(type)) {
-        return false;
-      }
-      return !previous || !typesForPlace(previous, entry).includes(type);
-    });
+    const types = entry.types.filter((type) => !clearedTypes.has(type));
     if (types.length > 0) {
       result.push({ ...entry, types });
     }
@@ -353,9 +348,7 @@ function siblingZoneCleared(
   const beforeZones = entry.list === 'zone' ? beforeWrite.zones : beforeWrite.secondLensZones;
   const afterZones = entry.list === 'zone' ? after.zones : after.secondLensZones;
   return (beforeZones ?? []).some((zone) => {
-    const same =
-      (entry.zoneId !== null && zone.id === entry.zoneId) ||
-      (entry.zoneId === null && entry.zoneName !== null && zone.name === entry.zoneName);
+    const same = zoneMatchesEntry(zone, entry);
     if (same) {
       return false;
     }
@@ -395,15 +388,106 @@ export function enforcedTypesAbsent(
     .filter((entry) => entry.types.length > 0);
 }
 
+function zoneMatchesEntry(zone: { id: number | null; name: string }, entry: SmartDetectEnforcedType): boolean {
+  if (entry.zoneId !== null && zone.id !== null) {
+    return zone.id === entry.zoneId;
+  }
+  return entry.zoneName !== null && entry.zoneName !== '' && zone.name === entry.zoneName;
+}
+
+/**
+ * Saved zone types that are already on the camera while some other saved zone
+ * is missing. A restore can omit them. If the controller puts them back, they
+ * are enforced. If it does not, the caller writes them back.
+ */
+export function typesToProbeOnRestore(saved: SmartDetectConfig, live: SmartDetectConfig): SmartDetectEnforcedType[] {
+  const entries = [
+    ...zoneProbeEntries('zone', saved.zones, live.zones),
+    ...zoneProbeEntries('secondLensZone', saved.secondLensZones, live.secondLensZones),
+  ];
+  const someMissing = entries.some(
+    (entry) => entry.savedTypes.length > 0 && !typesPresent(entry.savedTypes, entry.liveTypes),
+  );
+  if (!someMissing) {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.savedTypes.length > 0 && typesPresent(entry.savedTypes, entry.liveTypes))
+    .map((entry) => ({
+      list: entry.list,
+      zoneId: entry.zoneId,
+      zoneName: entry.zoneName,
+      types: [...entry.savedTypes],
+    }));
+}
+
+function zoneProbeEntries(
+  list: 'zone' | 'secondLensZone',
+  saved: SmartDetectZoneSnapshot[] | null,
+  live: SmartDetectZoneSnapshot[] | null,
+): Array<{
+  list: 'zone' | 'secondLensZone';
+  zoneId: number | null;
+  zoneName: string | null;
+  savedTypes: string[];
+  liveTypes: string[];
+}> {
+  return (saved ?? []).map((zone) => {
+    const match = (live ?? []).find((item) => sameZoneIdentity(zone, item));
+    return {
+      list,
+      zoneId: zone.id,
+      zoneName: zone.name || null,
+      savedTypes: [...zone.objectTypes],
+      liveTypes: match ? [...match.objectTypes] : [],
+    };
+  });
+}
+
+/** Removes probe types from a restore or clear payload. */
+export function omitTypesFromPatch(patch: SmartDetectPatch, omit: SmartDetectEnforcedType[]): void {
+  for (const entry of omit) {
+    const zones =
+      entry.list === 'secondLensZone'
+        ? patch.secondLensSmartDetectZones
+        : entry.list === 'zone'
+          ? patch.smartDetectZones
+          : undefined;
+    if (!zones) {
+      continue;
+    }
+    const drop = new Set(entry.types);
+    for (const zone of zones) {
+      const id = typeof zone.id === 'number' ? zone.id : null;
+      const name = typeof zone.name === 'string' ? zone.name : '';
+      if (!zoneMatchesEntry({ id, name }, entry) || !Array.isArray(zone.objectTypes)) {
+        continue;
+      }
+      zone.objectTypes = zone.objectTypes.filter((type) => typeof type !== 'string' || !drop.has(type));
+    }
+  }
+}
+
+export function probeTypesPresent(
+  probe: SmartDetectEnforcedType[],
+  actual: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return probe.filter((entry) => entry.types.every((type) => typesForPlace(actual, entry).includes(type)));
+}
+
+export function probeTypesAbsent(
+  probe: SmartDetectEnforcedType[],
+  actual: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return probe.filter((entry) => entry.types.some((type) => !typesForPlace(actual, entry).includes(type)));
+}
+
 function typesForPlace(config: SmartDetectConfig, entry: SmartDetectEnforcedType): string[] {
   if (entry.list === 'objectTypes' || entry.list === 'audioTypes' || entry.list === 'autoTrackingObjectTypes') {
     return config[entry.list];
   }
   const zones = entry.list === 'secondLensZone' ? config.secondLensZones : config.zones;
-  const zone = zones?.find(
-    (item) =>
-      (entry.zoneId !== null && item.id === entry.zoneId) || (entry.zoneName !== null && item.name === entry.zoneName),
-  );
+  const zone = zones?.find((item) => zoneMatchesEntry(item, entry));
   return zone?.objectTypes ?? [];
 }
 
@@ -447,8 +531,27 @@ export function patchForResidualLists(full: SmartDetectPatch, residuals: SmartDe
   return next;
 }
 
+/**
+ * Same list, and the same zone. Zone id wins when both sides have one, because
+ * it stays put when the zone is renamed. Name is only the fallback when an id
+ * is missing. Matching id and name together would store a second record after
+ * a rename. Matching id or name can attach a type to a different zone.
+ */
+export function enforcedPlacesMatch(left: SmartDetectEnforcedType, right: SmartDetectEnforcedType): boolean {
+  if (left.list !== right.list) {
+    return false;
+  }
+  if (left.list === 'objectTypes' || left.list === 'audioTypes' || left.list === 'autoTrackingObjectTypes') {
+    return true;
+  }
+  if (left.zoneId !== null && right.zoneId !== null) {
+    return left.zoneId === right.zoneId;
+  }
+  return left.zoneName !== null && left.zoneName !== '' && left.zoneName === right.zoneName;
+}
+
 function sameEnforcedPlace(left: SmartDetectEnforcedType, right: SmartDetectEnforcedType): boolean {
-  return left.list === right.list && left.zoneId === right.zoneId && left.zoneName === right.zoneName;
+  return enforcedPlacesMatch(left, right);
 }
 
 function withoutKnownEnforced(
@@ -481,11 +584,7 @@ export function withoutRefilledTypes(
     if (!zones) {
       continue;
     }
-    const index = zones.findIndex(
-      (zone) =>
-        (entry.zoneId !== null && zone.id === entry.zoneId) ||
-        (entry.zoneName !== null && zone.name === entry.zoneName),
-    );
+    const index = zones.findIndex((zone) => zoneMatchesEntry(zone, entry));
     const zone = index >= 0 ? zones[index] : undefined;
     if (!zone) {
       continue;

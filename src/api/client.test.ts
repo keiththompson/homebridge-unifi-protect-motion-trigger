@@ -1049,7 +1049,7 @@ describe('smart detection snapshots', () => {
     expect(droppedHealth.controllers[0]?.cameras[0]?.smartDetectEnforcedTypes).toEqual([]);
   });
 
-  it('keeps a saved type that was already on the camera when the clear is ignored', async () => {
+  it('drops package the snapshot already owned when the clear puts it back', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-heal-'));
     const poisoned = readConfig(doorbellRecord(['package']));
     const snapshotStore = new SmartDetectSnapshotStore(() => dir);
@@ -1071,13 +1071,15 @@ describe('smart detection snapshots', () => {
     const doorbell = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
     const healed = await client.updateCameraSmartDetection(doorbell, false);
 
-    expect(healed.smartDetectResult).not.toBe('ok');
-    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([]);
+    expect(healed.smartDetectResult).toBe('ok');
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
     expect(healed.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
-    expect(healed.smartDetectConfig?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+    expect(healed.smartDetectConfig?.secondLensZones?.[0]?.objectTypes).toEqual([]);
     expect(mainLensTypes(dir)).toEqual(['person', 'vehicle']);
-    expect(secondLensTypes(dir)).toEqual(['package']);
-    expect(log.error).toHaveBeenCalled();
+    expect(secondLensTypes(dir)).toEqual([]);
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it('keeps an enforced second-lens type out of the snapshot across on and off', async () => {
@@ -1216,6 +1218,12 @@ describe('smart detection snapshots', () => {
       controllerAddress: '10.0.0.5',
     });
     (client as unknown as { connected: boolean }).connected = true;
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      refillEmptySecondLens(store);
+      return structuredClone(store);
+    });
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
 
     const outcome = await client.updateCameraSmartDetection(
       { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
@@ -1224,7 +1232,12 @@ describe('smart detection snapshots', () => {
 
     expect(outcome.smartDetectResult).toBe('ok');
     expect(store.smartDetectZones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
     expect(mainLensTypes(dir)).toEqual(['person', 'vehicle']);
+    expect(secondLensTypes(dir)).toEqual([]);
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
     const zones = apiState.updateDevice.mock.calls.map(
       (call) => (call[1] as { smartDetectZones?: unknown }).smartDetectZones,
     );
