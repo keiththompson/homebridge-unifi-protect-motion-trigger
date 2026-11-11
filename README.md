@@ -85,11 +85,13 @@ For security, create a dedicated local user for Homebridge:
 
   The HomeKit switch follows the smart-detection state read from Protect. A camera discovered with smart detection already off shows the switch off, and that empty state is not saved as the snapshot. If there is no saved snapshot, turning the switch on does not invent a zone; the switch returns to off and Protect is left unchanged.
 
+  Some controllers put a type back onto a list the plugin saved as empty. A second-lens zone is one case: clearing its `objectTypes` can come back with a type that was not in the snapshot. The switch still turns off when every saved type is gone. Those leftover types are listed in the health file as `smartDetectEnforcedTypes` and are not reported as drift. Turning the switch on writes the saved snapshot. If the controller then keeps or drops the leftover types, the switch stays on and the snapshot is not rewritten to include them. A later off does not patch the camera again while only those leftover types remain.
+
   The snapshot is written to `{Homebridge storage}/.unifi-protect-motion-trigger-smart-detect.json` before the disable PATCH. A restart while the switch is off reloads that file. A camera that is already off does not replace a saved snapshot. The zone PATCH sends only fields Protect accepts (`id`, `name`, `color`, `points`, `sensitivity`, `objectTypes`, and `isTriggerLightEnabled` when the camera has it). If that write is rejected, it is retried without the optional fields. A failed smart-detection write does not block the Motion Enabled or Status LED change in the same request, and it does not block the next camera.
 
   Motion Enabled, Smart Detection, and Status LED share one write queue per controller. A scene that flips more than one switch on the same camera sends them in one request, so they cannot race.
 
-  Read-back works the same way as Create Motion Events. The log line `smart detection disabled` or `smart detection restored` is written only after the camera GET agrees. If it does not, HomeKit reverts the Smart Detection switch and health reports drift.
+  Read-back works the same way as Create Motion Events. The log line `smart detection disabled` or `smart detection restored` is written only after the camera GET agrees. Agreement allows types the controller puts on a list the snapshot left empty; the same log line names those types once. If a saved type is still missing or still present when it should not be, HomeKit reverts the Smart Detection switch and health reports drift.
 
 - **Status LED Switch**: This directly controls the camera's indicator LED via the UniFi Protect API, and that change is also confirmed by reading the camera back.
 
@@ -155,7 +157,8 @@ home-monitor reads `updatedAtEpoch` (falling back to the file mtime) and treats 
 | `controllers[].cameras[].smartDetectPreferencesSaved`        | True when an active smart-detection snapshot is saved for restore                                                                                                              |
 | `controllers[].cameras[].smartDetectExpected`                | Settings lists and zones the switch should have produced (`objectTypes`, and each zone's `name`, `sensitivity`, `objectTypes`, `points`), or `null`                            |
 | `controllers[].cameras[].smartDetectActual`                  | Those same fields from the last successful camera read, or `null`                                                                                                              |
-| `controllers[].cameras[].smartDetectDrift`                   | `true` when expected and actual smart detection disagree. `null` when either side is unknown                                                                                   |
+| `controllers[].cameras[].smartDetectDrift`                   | `true` when expected and actual smart detection disagree. `null` when either side is unknown. Leftover types in `smartDetectEnforcedTypes` are not drift                       |
+| `controllers[].cameras[].smartDetectEnforcedTypes`           | Types on the last read that are not in the saved snapshot (`list`, `zoneId`, `zoneName`, `types`). Empty when compared and none. `null` when there is no snapshot or no read   |
 | `controllers[].cameras[].drift`                              | `true` when the switch and last read disagree, including smart detection. `null` when the motion flag is unknown                                                               |
 | `controllers[].cameras[].readback.status`                    | `verified`, `mismatch`, `unknown`, `stale`, or `error`                                                                                                                         |
 | `controllers[].cameras[].readback.fetchedAt`                 | ISO time of the last successful read, or `null`                                                                                                                                |
@@ -166,9 +169,9 @@ home-monitor reads `updatedAtEpoch` (falling back to the file mtime) and treats 
 
 ### Checking the Smart Detection switch
 
-Turn **Smart Detection** off for one camera. In Protect, that camera's smart-detection object types should be cleared. Zone shapes and sensitivity stay as they were. The Motion Enabled switch and recording mode stay as they were. The log includes `smart detection disabled` only after the camera GET agrees.
+Turn **Smart Detection** off for one camera. In Protect, the types saved for that camera are cleared. A type the controller puts back on a list that was empty can remain; the switch is still off. Zone shapes and sensitivity stay as they were. The Motion Enabled switch and recording mode stay as they were. The log includes `smart detection disabled` only after the camera GET agrees.
 
-`.unifi-protect-motion-trigger-smart-detect.json` should contain that camera's original object types, zone name, points, and sensitivity. Another camera keeps its own values. In the health file, `cameraHealth[].smartDetectDrift` is false and `readback.status` is `verified` when the read matches. `smartDetectExpected` and `smartDetectActual` show the object types and each zone's name, sensitivity, and points.
+`.unifi-protect-motion-trigger-smart-detect.json` should contain that camera's original object types, zone name, points, and sensitivity. Another camera keeps its own values. In the health file, `cameraHealth[].smartDetectDrift` is false and `readback.status` is `verified` when the read matches. `smartDetectExpected` and `smartDetectActual` show the object types and each zone's name, sensitivity, and points. `smartDetectEnforcedTypes` lists any types the controller kept that the snapshot does not contain. Those do not set `smartDetectDrift`.
 
 Restart Homebridge while the switch stays off. The snapshot file should still contain the original types, not the cleared ones. Turn **Smart Detection** on. That camera gets its own zones and object types back. A zone that was sensitivity 75 is 75 again, even if a different camera's zone is 50.
 

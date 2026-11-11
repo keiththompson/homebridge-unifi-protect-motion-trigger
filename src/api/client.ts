@@ -17,14 +17,17 @@ import {
   readMotionDiagnostics,
 } from './motion-state.js';
 import {
+  listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
   planSmartDetectWrite,
   preferencesFromConfig,
   readSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectConfigActive,
+  type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
+  withoutUnsavedSmartDetectTypes,
 } from './smart-detect.js';
 import type {
   LedSettings,
@@ -429,25 +432,27 @@ export class ProtectClient {
       return finish('failed', 'failed', config);
     }
 
-    const payload = this.buildPayload(settings, smartSkipped ? null : smartPlan);
-    if (!payloadHasChanges(payload)) {
-      const already =
-        !wantsSmart ||
-        !smartPlan?.expectedConfig ||
-        (liveCamera !== null &&
-          motionReadbackMatches(liveCamera, { smartDetectConfig: smartPlan.expectedConfig, smartDetect: null }));
-      const smartResult: UpdateResult | null = wantsSmart ? (already ? 'ok' : 'mismatch') : null;
-      return finish(controlsRequested ? 'ok' : (smartResult ?? 'ok'), smartResult, config);
-    }
     const expected: MotionReadbackExpectation = {
       smartDetect: null,
       smartDetectConfig: smartSkipped ? null : (smartPlan?.expectedConfig ?? null),
+      smartDetectBaseline: smartSkipped ? null : (smartPlan?.config ?? null),
+      smartDetectEnabling: settings.smartDetect === true,
     };
     if (wantsLed) {
       expected.led = settings.led;
     }
     if (wantsMotion) {
       expected.createMotionEvents = settings.motion;
+    }
+
+    const payload = this.buildPayload(settings, smartSkipped ? null : smartPlan);
+    if (!payloadHasChanges(payload)) {
+      const already =
+        !wantsSmart ||
+        !expected.smartDetectConfig ||
+        (liveCamera !== null && motionReadbackMatches(liveCamera, expected));
+      const smartResult: UpdateResult | null = wantsSmart ? (already ? 'ok' : 'mismatch') : null;
+      return finish(controlsRequested ? 'ok' : (smartResult ?? 'ok'), smartResult, config);
     }
 
     const done = (
@@ -504,6 +509,8 @@ export class ProtectClient {
           motionReadbackMatches(readback.camera, {
             smartDetect: null,
             smartDetectConfig: expected.smartDetectConfig ?? null,
+            smartDetectBaseline: expected.smartDetectBaseline ?? null,
+            smartDetectEnabling: expected.smartDetectEnabling,
           });
         const controlResult: UpdateResult = controlsMatch ? 'ok' : 'mismatch';
         let smartResult: UpdateResult | null = wantsSmart ? 'ok' : null;
@@ -523,11 +530,12 @@ export class ProtectClient {
         if ((!controlsRequested || controlsMatch) && (!wantsSmart || smartResult === 'ok')) {
           if (settings.smartDetect === true && readback.camera) {
             const confirmed = readSmartDetectConfig(readback.camera);
-            if (smartDetectConfigActive(confirmed)) {
-              this.persistSmartDetectSnapshot(camera, confirmed);
+            const cleaned = config ? withoutUnsavedSmartDetectTypes(confirmed, config) : confirmed;
+            if (smartDetectConfigActive(cleaned)) {
+              this.persistSmartDetectSnapshot(camera, cleaned);
             }
           }
-          this.log.info(`${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`);
+          this.log.info(this.confirmedReadbackMessage(camera, changes, config, readback.camera));
         }
         const result = controlsRequested ? controlResult : (smartResult ?? 'failed');
         return done(result, smartResult, readback.camera);
@@ -979,6 +987,26 @@ export class ProtectClient {
     }
   }
 
+  private confirmedReadbackMessage(
+    camera: ProtectCamera,
+    changes: string[],
+    baseline: SmartDetectConfig | null,
+    actual: ProtectCamera | null,
+  ): string {
+    const confirmed = `${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`;
+    if (!baseline || !actual) {
+      return confirmed;
+    }
+    const enforced = listSmartDetectEnforcedTypes(baseline, readSmartDetectConfig(actual));
+    if (enforced.length === 0) {
+      return confirmed;
+    }
+    return (
+      `${confirmed}. Protect kept smart-detection types this plugin did not save ` +
+      `(${formatEnforcedTypes(enforced)}). The saved snapshot was not changed.`
+    );
+  }
+
   private logReadbackMismatch(camera: ProtectCamera, expected: MotionReadbackExpectation, actual: ProtectCamera): void {
     const diagnostics = readMotionDiagnostics(actual);
     const actualTypes = describeSmartDetect(diagnostics.smartDetectConfig);
@@ -1079,6 +1107,20 @@ function withoutSmartDetect(payload: CameraWritePayload): CameraWritePayload {
     ...(payload.ledSettings ? { ledSettings: payload.ledSettings } : {}),
     ...(payload.recordingSettings ? { recordingSettings: payload.recordingSettings } : {}),
   };
+}
+
+function formatEnforcedTypes(enforced: SmartDetectEnforcedType[]): string {
+  return enforced
+    .map((entry) => {
+      const place =
+        entry.list === 'secondLensZone'
+          ? `second lens${entry.zoneName ? ` ${entry.zoneName}` : ''}`
+          : entry.list === 'zone'
+            ? `zone${entry.zoneName ? ` ${entry.zoneName}` : ''}`
+            : entry.list;
+      return `${place}: ${entry.types.join(', ')}`;
+    })
+    .join('; ');
 }
 
 function describeSmartDetect(config: SmartDetectConfig | null | undefined): string {

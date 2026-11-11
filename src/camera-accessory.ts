@@ -5,7 +5,7 @@ import {
   readSmartDetectConfig,
   sanitizeSmartDetectConfig,
   type SmartDetectConfig,
-  smartDetectConfigActive,
+  smartDetectEffectivelyEnabled,
 } from './api/smart-detect.js';
 import type { LedSettings, ProtectCamera, UpdateResult } from './api/types.js';
 import type { ProtectMotionPlatform } from './platform.js';
@@ -50,9 +50,10 @@ export class CameraAccessory {
         ? camera.recordingSettings.enableMotionDetection
         : true;
     this.isMotionEnabled = motionEnabled;
-    // The switch shows Protect's current smart detection, including a camera
-    // discovered with it already off. That does not save an empty snapshot.
-    this.isSmartDetectEnabled = smartDetectConfigActive(readSmartDetectConfig(camera));
+    // The switch shows the saved snapshot's types when one exists. Types the
+    // controller adds on a list that snapshot left empty do not turn it on.
+    // A camera discovered with detection already off does not save an empty snapshot.
+    this.isSmartDetectEnabled = smartDetectEffectivelyEnabled(readSmartDetectConfig(camera), this.smartDetectConfig);
 
     this.configureAccessoryInformation(camera);
     this.motionSensor = this.configureMotionSensor();
@@ -434,7 +435,7 @@ export class CameraAccessory {
     if (!this.smartSwitch) {
       return;
     }
-    const active = smartDetectConfigActive(readSmartDetectConfig(merged));
+    const active = smartDetectEffectivelyEnabled(readSmartDetectConfig(merged), this.smartDetectConfig);
     this.isSmartDetectEnabled = active;
     this.updateSmartSwitchState(active);
   }
