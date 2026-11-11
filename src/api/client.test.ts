@@ -1203,6 +1203,33 @@ describe('smart detection snapshots', () => {
     expect(secondLensTypes(dir)).toEqual(['package']);
     expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([]);
   });
+
+  it('restores the main lens when on is requested for a half-off doorbell', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-on-'));
+    const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+    snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(doorbellRecord(['package'])));
+    store = doorbellRecord(['package']);
+    store.smartDetectZones = (store.smartDetectZones ?? []).map((zone) => ({ ...zone, objectTypes: [] }));
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: snapshotStore,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const outcome = await client.updateCameraSmartDetection(
+      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
+      true,
+    );
+
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(mainLensTypes(dir)).toEqual(['person', 'vehicle']);
+    const zones = apiState.updateDevice.mock.calls.map(
+      (call) => (call[1] as { smartDetectZones?: unknown }).smartDetectZones,
+    );
+    expect(zones.some((value) => Array.isArray(value))).toBe(true);
+  });
 });
 
 describe('partial clears are not enforcement', () => {

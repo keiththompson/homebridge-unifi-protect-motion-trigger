@@ -6,6 +6,7 @@ import {
   sanitizeSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectEffectivelyEnabled,
+  type SmartDetectEnforcedType,
 } from './api/smart-detect.js';
 import type { LedSettings, ProtectCamera, UpdateResult } from './api/types.js';
 import type { ProtectMotionPlatform } from './platform.js';
@@ -53,7 +54,7 @@ export class CameraAccessory {
     // The switch shows the saved snapshot's types when one exists. Types the
     // controller adds on a list that snapshot left empty do not turn it on.
     // A camera discovered with detection already off does not save an empty snapshot.
-    this.isSmartDetectEnabled = smartDetectEffectivelyEnabled(readSmartDetectConfig(camera), this.smartDetectConfig);
+    this.isSmartDetectEnabled = this.smartDetectIsOn();
 
     this.configureAccessoryInformation(camera);
     this.motionSensor = this.configureMotionSensor();
@@ -252,7 +253,7 @@ export class CameraAccessory {
     if (motion !== undefined && motion !== this.isMotionEnabled) {
       settings.motion = motion;
     }
-    if (smart !== undefined && smart !== this.isSmartDetectEnabled) {
+    if (smart !== undefined && this.smartDetectChangeNeeded(smart)) {
       settings.smartDetect = smart;
     }
 
@@ -435,9 +436,30 @@ export class CameraAccessory {
     if (!this.smartSwitch) {
       return;
     }
-    const active = smartDetectEffectivelyEnabled(readSmartDetectConfig(merged), this.smartDetectConfig);
+    const active = this.smartDetectIsOn(merged);
     this.isSmartDetectEnabled = active;
     this.updateSmartSwitchState(active);
+  }
+
+  /** True when the saved snapshot, ignoring enforced types, is on the camera. */
+  private smartDetectIsOn(camera: ProtectCamera = this.camera): boolean {
+    return smartDetectEffectivelyEnabled(readSmartDetectConfig(camera), this.smartDetectConfig, this.enforcedTypes());
+  }
+
+  /**
+   * HomeKit can report the switch on while the camera has drifted. Turning it
+   * on again must still write the snapshot.
+   */
+  private smartDetectChangeNeeded(requested: boolean): boolean {
+    if (requested !== this.isSmartDetectEnabled) {
+      return true;
+    }
+    return requested && !this.smartDetectIsOn();
+  }
+
+  private enforcedTypes(): SmartDetectEnforcedType[] {
+    const reader = this.client as { enforcedSmartDetect?: (cameraId: string) => SmartDetectEnforcedType[] };
+    return reader.enforcedSmartDetect?.(this.camera.id) ?? [];
   }
 
   private updateSmartSwitchState(enabled: boolean): void {

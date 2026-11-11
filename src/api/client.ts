@@ -618,11 +618,16 @@ export class ProtectClient {
     return payload;
   }
 
-  private enforcedTypes(camera: ProtectCamera): SmartDetectEnforcedType[] {
+  /** Recorded types Protect adds on its own. Empty when this camera has none. */
+  public enforcedSmartDetect(cameraId: string): SmartDetectEnforcedType[] {
     if (!this.smartDetectStore || !this.controllerAddress) {
       return [];
     }
-    return this.smartDetectStore.getEnforced(this.controllerAddress, camera.id);
+    return this.smartDetectStore.getEnforced(this.controllerAddress, cameraId);
+  }
+
+  private enforcedTypes(camera: ProtectCamera): SmartDetectEnforcedType[] {
+    return this.enforcedSmartDetect(camera.id);
   }
 
   /**

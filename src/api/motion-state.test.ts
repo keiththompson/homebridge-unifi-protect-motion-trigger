@@ -13,6 +13,7 @@ import {
   planSmartDetectWrite,
   sanitizeSmartDetectConfig,
   type SmartDetectConfig,
+  smartDetectEffectivelyEnabled,
   smartDetectObligationMet,
   type SmartDetectZoneSnapshot,
   typesStillOwned,
@@ -332,6 +333,25 @@ describe('motion state', () => {
     expect(typesStillOwned(packageAlready, empty, packageAdded)).toEqual([
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
+  });
+
+  it('does not treat a half-off doorbell as on because package remains', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], ['package']);
+    const halfOff = dualLensConfig([], ['package']);
+    const restored = dualLensConfig(['person', 'vehicle'], ['package']);
+
+    expect(smartDetectEffectivelyEnabled(halfOff, saved)).toBe(false);
+    expect(smartDetectEffectivelyEnabled(restored, saved)).toBe(true);
+    expect(
+      smartDetectEffectivelyEnabled(halfOff, dualLensConfig(['person', 'vehicle'], []), [
+        { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+      ]),
+    ).toBe(false);
+    expect(
+      smartDetectEffectivelyEnabled(restored, dualLensConfig(['person', 'vehicle'], []), [
+        { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+      ]),
+    ).toBe(true);
   });
 
   it('does not replace a snapshot with a half-cleared camera', () => {

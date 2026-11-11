@@ -247,20 +247,28 @@ export function listSmartDetectEnforcedTypes(
 }
 
 /**
- * Switch position. With a saved snapshot, only that snapshot's types count.
- * Types the controller adds on its own do not turn the switch on.
+ * Switch position. On means the saved snapshot is actually on the camera.
+ * A single leftover type, including one Protect enforces, does not count.
+ * Enforced types are ignored on both sides, so their presence or absence
+ * does not move the switch.
  */
 export function smartDetectEffectivelyEnabled(
   live: SmartDetectConfig | null | undefined,
   saved: SmartDetectConfig | null | undefined,
+  enforced: SmartDetectEnforcedType[] = [],
 ): boolean {
   if (!live) {
     return false;
   }
   if (saved && smartDetectConfigActive(saved)) {
-    return smartDetectOwnedTypesRemain(saved, live);
+    const comparable = enforced.length > 0 ? withoutRefilledTypes(saved, enforced) : saved;
+    if (!smartDetectConfigActive(comparable)) {
+      return false;
+    }
+    return smartDetectObligationMet(true, comparable, live);
   }
-  return smartDetectConfigActive(live);
+  const comparableLive = enforced.length > 0 ? withoutRefilledTypes(live, enforced) : live;
+  return smartDetectConfigActive(comparableLive);
 }
 
 /**

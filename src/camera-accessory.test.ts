@@ -353,6 +353,7 @@ describe('CameraAccessory motion lifecycle', () => {
     expect(namedSwitch(accessory, 'smart-detect-switch').invokeGet()).toBe(false);
 
     cameraAccessory.handleSmartDetectUpdate({
+      smartDetectZones: [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: [] }],
       secondLensSmartDetectZones: [
         { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
       ],
@@ -366,6 +367,76 @@ describe('CameraAccessory motion lifecycle', () => {
       ],
     });
     expect(cameraAccessory.smartDetectState).toBe(true);
+  });
+
+  it('sends on again when the switch is on but the main lens does not match the snapshot', async () => {
+    vi.useFakeTimers();
+    const accessory = createMockAccessory('Entrance Doorbell', 'uuid-door-on');
+    const points = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ];
+    const downPoints = [
+      [0.1, 0.8],
+      [0.9, 0.8],
+      [0.9, 1],
+    ];
+    const live = camera(true);
+    live.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
+    live.smartDetectZones = [{ id: 1, name: 'Default', points, sensitivity: 50, objectTypes: [] }];
+    live.secondLensSmartDetectZones = [
+      { id: 1, name: 'Default', points: downPoints, sensitivity: 50, objectTypes: ['package'] },
+    ];
+    accessory.context.camera = live;
+    accessory.context.smartDetectConfig = {
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Default',
+          points,
+          sensitivity: 50,
+          objectTypes: ['person', 'vehicle'],
+          raw: { id: 1, name: 'Default', points, sensitivity: 50, objectTypes: ['person', 'vehicle'] },
+        },
+      ],
+      secondLensZones: [
+        {
+          id: 1,
+          name: 'Default',
+          points: downPoints,
+          sensitivity: 50,
+          objectTypes: ['package'],
+          raw: { id: 1, name: 'Default', points: downPoints, sensitivity: 50, objectTypes: ['package'] },
+        },
+      ],
+    };
+    const updateCameraSettings = vi.fn().mockResolvedValue({
+      ...outcome('ok'),
+      smartDetectResult: 'ok',
+      smartDetectConfig: accessory.context.smartDetectConfig,
+    });
+    const cameraAccessory = new CameraAccessory(
+      platform(),
+      accessory,
+      { updateCameraSettings } as unknown as ProtectClient,
+      10,
+    );
+    expect(cameraAccessory.smartDetectState).toBe(false);
+
+    accessory.context.smartDetectEnabled = true;
+    const pending = namedSwitch(accessory, 'smart-detect-switch').invokeSet(true);
+    await vi.advanceTimersByTimeAsync(50);
+    await pending;
+
+    expect(updateCameraSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cam1' }),
+      expect.objectContaining({ smartDetect: true }),
+    );
   });
 
   it('removes a Smart Detection service that was already added when the switch is hidden', () => {
