@@ -293,6 +293,81 @@ export function addedByController(
  * Types we tried to remove that are still on the camera. A second clear may
  * still remove them. They are not evidence of enforcement.
  */
+/**
+ * A type that is still present after the clear, was not removed from any other
+ * list, and was not in the previous snapshot. Another list must have cleared,
+ * so an ignored write does not qualify. A zone that sticks while a sibling
+ * zone in the same list clears is a partial apply, not enforcement.
+ */
+export function survivingUnownedTypes(
+  previous: SmartDetectConfig | null,
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  const cleared = typesThatCleared(beforeWrite, written, after);
+  if (cleared.length === 0) {
+    return [];
+  }
+  const clearedTypes = new Set(cleared.flatMap((entry) => entry.types));
+  const survived = typesStillOwned(beforeWrite, written, after);
+  const result: SmartDetectEnforcedType[] = [];
+  for (const entry of survived) {
+    if (siblingZoneCleared(entry, beforeWrite, after)) {
+      continue;
+    }
+    const types = entry.types.filter((type) => {
+      if (clearedTypes.has(type)) {
+        return false;
+      }
+      return !previous || !typesForPlace(previous, entry).includes(type);
+    });
+    if (types.length > 0) {
+      result.push({ ...entry, types });
+    }
+  }
+  return result;
+}
+
+function typesThatCleared(
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return typesStillOwned(beforeWrite, written, beforeWrite)
+    .map((entry) => {
+      const still = new Set(typesForPlace(after, entry));
+      return { ...entry, types: entry.types.filter((type) => !still.has(type)) };
+    })
+    .filter((entry) => entry.types.length > 0);
+}
+
+function siblingZoneCleared(
+  entry: SmartDetectEnforcedType,
+  beforeWrite: SmartDetectConfig,
+  after: SmartDetectConfig,
+): boolean {
+  if (entry.list !== 'zone' && entry.list !== 'secondLensZone') {
+    return false;
+  }
+  const beforeZones = entry.list === 'zone' ? beforeWrite.zones : beforeWrite.secondLensZones;
+  const afterZones = entry.list === 'zone' ? after.zones : after.secondLensZones;
+  return (beforeZones ?? []).some((zone) => {
+    const same =
+      (entry.zoneId !== null && zone.id === entry.zoneId) ||
+      (entry.zoneId === null && entry.zoneName !== null && zone.name === entry.zoneName);
+    if (same) {
+      return false;
+    }
+    const later = (afterZones ?? []).find(
+      (candidate) =>
+        (zone.id !== null && candidate.id === zone.id) || (zone.id === null && candidate.name === zone.name),
+    );
+    const laterTypes = new Set(later?.objectTypes ?? []);
+    return zone.objectTypes.some((type) => !laterTypes.has(type));
+  });
+}
+
 export function typesStillOwned(
   beforeWrite: SmartDetectConfig,
   written: SmartDetectConfig,

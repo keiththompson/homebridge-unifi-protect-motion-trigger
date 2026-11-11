@@ -1232,6 +1232,45 @@ describe('smart detection snapshots', () => {
   });
 });
 
+describe('doorbell package already present while on', () => {
+  for (const variant of ['healthy-snapshot', 'no-snapshot'] as const) {
+    it(`records package and stays ok across on and off from ${variant}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-live-'));
+      const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+      if (variant === 'healthy-snapshot') {
+        snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(doorbellRecord([])));
+      }
+      store = doorbellRecord(['package']);
+      apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+        applyPatch(store, payload);
+        refillEmptySecondLens(store);
+        return structuredClone(store);
+      });
+      apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+      const client = new ProtectClient(createMockLogger(), {
+        sleep: async () => undefined,
+        smartDetectStore: snapshotStore,
+        controllerAddress: '10.0.0.5',
+      });
+      (client as unknown as { connected: boolean }).connected = true;
+      const cam = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
+
+      const results = [];
+      for (const enabled of [false, true, false, true, false]) {
+        const outcome = await client.updateCameraSmartDetection(cam, enabled);
+        results.push(outcome.smartDetectResult);
+      }
+
+      expect(results).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
+      expect(snapshotStore.get('10.0.0.5', 'doorbell')?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+      expect(snapshotStore.get('10.0.0.5', 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+      expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+        { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+      ]);
+    });
+  }
+});
+
 describe('partial clears are not enforcement', () => {
   const porch = [
     [0, 0],

@@ -32,6 +32,7 @@ import {
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
+  survivingUnownedTypes,
   typesStillOwned,
   withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
@@ -516,6 +517,7 @@ export class ProtectClient {
         const confirmedCamera = await this.confirmEnforcedTypes(
           camera,
           smartPlan,
+          keptConfig,
           liveCamera,
           observed,
           expected,
@@ -638,6 +640,7 @@ export class ProtectClient {
   private async confirmEnforcedTypes(
     camera: ProtectCamera,
     plan: SmartDetectWritePlan,
+    previous: SmartDetectConfig | null,
     beforeWriteCamera: ProtectCamera,
     observed: ProtectCamera,
     expected: MotionReadbackExpectation,
@@ -664,8 +667,12 @@ export class ProtectClient {
         }
       }
     }
+    const after = readSmartDetectConfig(current);
     const added = novelResidualTypes(
-      addedByController(beforeWrite, written, readSmartDetectConfig(current)),
+      [
+        ...addedByController(beforeWrite, written, after),
+        ...survivingUnownedTypes(previous, beforeWrite, written, after),
+      ],
       this.enforcedTypes(camera),
     );
     if (added.length === 0) {

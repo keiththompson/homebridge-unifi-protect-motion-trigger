@@ -16,6 +16,7 @@ import {
   smartDetectEffectivelyEnabled,
   smartDetectObligationMet,
   type SmartDetectZoneSnapshot,
+  survivingUnownedTypes,
   typesStillOwned,
 } from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
@@ -333,6 +334,11 @@ describe('motion state', () => {
     expect(typesStillOwned(packageAlready, empty, packageAdded)).toEqual([
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
+    const previous = dualLensConfig(['person', 'vehicle'], []);
+    expect(survivingUnownedTypes(previous, packageAlready, empty, packageAdded)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+    expect(survivingUnownedTypes(packageAlready, packageAlready, empty, packageAdded)).toEqual([]);
   });
 
   it('does not treat a half-off doorbell as on because package remains', () => {
