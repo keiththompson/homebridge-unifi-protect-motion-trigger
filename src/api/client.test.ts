@@ -39,6 +39,7 @@ const apiState = vi.hoisted(() => ({
   getApiEndpoint: vi.fn(),
   getBootstrap: vi.fn(async () => true),
   login: vi.fn(async (..._args: unknown[]) => true),
+  reset: vi.fn(),
 }));
 
 vi.mock('unifi-protect', () => ({
@@ -62,7 +63,7 @@ vi.mock('unifi-protect', () => ({
       getBootstrap: () => apiState.getBootstrap(),
       login: (...args: unknown[]) => apiState.login(...args),
       on: vi.fn(),
-      reset: vi.fn(),
+      reset: () => apiState.reset(),
     };
   }),
 }));
@@ -128,6 +129,7 @@ beforeEach(() => {
   apiState.eventsWs = { readyState: 1 };
   apiState.getBootstrap = vi.fn(async () => true);
   apiState.login = vi.fn(async (..._args: unknown[]) => true);
+  apiState.reset = vi.fn();
   apiState.getApiEndpoint = vi.fn(() => 'https://nvr.example/proxy/protect/api/cameras');
   apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
     const echo = structuredClone(store);
@@ -890,6 +892,7 @@ describe('Protect session recovery', () => {
     expect(outcome.result).toBe('unauthorized');
     expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
     expect(apiState.updateDevice).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('cannot change device settings'));
     expect(log.error).not.toHaveBeenCalledWith(expect.stringContaining('not a Protect admin'));
     expect(log.warn).not.toHaveBeenCalledWith(expect.stringContaining('not a Protect admin'));
     expect(log.error).not.toHaveBeenCalledWith(expect.stringContaining('not an admin'));
@@ -981,5 +984,93 @@ describe('Protect session recovery', () => {
       client.disconnect();
       vi.useRealTimers();
     }
+  });
+
+  it('backs off repeated login attempts after a refresh keeps failing', async () => {
+    vi.useFakeTimers();
+    apiState.getBootstrap = vi.fn(async () => false);
+    const client = connectedClient();
+    try {
+      loggedOutLibrary();
+      await client.updateCameraMotionDetection(camera, false);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      await client.updateCameraMotionDetection(camera, false);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await client.updateCameraMotionDetection(camera, false);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(9_000);
+      await client.updateCameraMotionDetection(camera, false);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await client.updateCameraMotionDetection(camera, false);
+      expect(apiState.getBootstrap).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refreshes the session at most twice when every write loses it again', async () => {
+    store = zonedCamera(
+      'cam1',
+      'Front Door',
+      'Porch',
+      75,
+      ['person'],
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+      ],
+    );
+    apiState.bootstrap = { cameras: [store], lastUpdateId: '1' };
+    apiState.updateDevice = vi.fn(async () => {
+      loggedOutLibrary();
+      return null;
+    });
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    apiState.getBootstrap = vi.fn(async () => {
+      apiState.bootstrap = { cameras: [store], lastUpdateId: '2' };
+      apiState.isAdminUser = true;
+      apiState.eventsWs = { readyState: 1 };
+      return true;
+    });
+    const client = connectedClient();
+
+    await client.updateCameraSettings(camera, { motion: false, smartDetect: false });
+
+    expect(apiState.getBootstrap).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes a socket the library opens after disconnect', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new ProtectClient(createMockLogger(), { sleep: async () => undefined });
+    await client.connect('10.0.0.5', 'stored-user', 'stored-password');
+    apiState.reset.mockClear();
+    apiState.getBootstrap = vi.fn(async () => {
+      await gate;
+      apiState.bootstrap = { cameras: [store], lastUpdateId: '3' };
+      apiState.isAdminUser = true;
+      apiState.eventsWs = { readyState: 1 };
+      return true;
+    });
+    loggedOutLibrary();
+
+    const pending = client.refreshCamera(camera);
+    expect(apiState.getBootstrap).toHaveBeenCalledTimes(1);
+    client.disconnect();
+    release();
+    await pending;
+
+    expect(apiState.reset).toHaveBeenCalledTimes(2);
+    expect(client.isConnected).toBe(false);
   });
 });

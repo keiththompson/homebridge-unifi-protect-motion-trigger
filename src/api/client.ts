@@ -44,8 +44,11 @@ export const SESSION_WATCHDOG_BASE_MS = 3 * 60 * 1000;
 /** Longest delay between session recovery attempts after repeated failures. */
 export const SESSION_WATCHDOG_MAX_MS = 15 * 60 * 1000;
 
-/** Skip another bootstrap refresh immediately after one just failed. */
+/** Base delay before another login after a failed refresh. Doubles with each failure. */
 const RECOVERY_FAILURE_FLOOR_MS = 5_000;
+
+/** One settings update may refresh the session this many times. */
+const UPDATE_RECOVERY_BUDGET = 2;
 
 /** WebSocket.OPEN. The unifi-protect events socket is private and only present while connected. */
 const WEBSOCKET_OPEN = 1;
@@ -280,9 +283,12 @@ export class ProtectClient {
    * Read-only refresh for health checks. Replaces the last snapshot, including on failure,
    * so an error is not reported as the previous successful state.
    */
-  public async refreshCamera(camera: ProtectCamera): Promise<CameraReadbackSnapshot> {
+  public async refreshCamera(
+    camera: ProtectCamera,
+    budget: SessionRecoveryBudget = { remaining: 1 },
+  ): Promise<CameraReadbackSnapshot> {
     try {
-      const record = await this.fetchCameraRecord(camera);
+      const record = await this.fetchCameraRecord(camera, budget);
       if (!record) {
         const snapshot = errorSnapshot(`No camera record returned for ${camera.name}`, 1);
         this.snapshots.set(camera.id, snapshot);
@@ -356,7 +362,8 @@ export class ProtectClient {
     if (this.api.isThrottled) {
       return finish('throttled');
     }
-    const session = await this.ensureWritableSession();
+    const budget: SessionRecoveryBudget = { remaining: UPDATE_RECOVERY_BUDGET };
+    const session = await this.ensureWritableSession(budget);
     if (session === 'unauthorized') {
       return finish('unauthorized');
     }
@@ -367,7 +374,7 @@ export class ProtectClient {
 
     let liveCamera: ProtectCamera | null = null;
     if (wantsSmart) {
-      liveCamera = await this.readCameraBeforeChange(camera, true);
+      liveCamera = await this.readCameraBeforeChange(camera, true, budget);
     }
 
     let smartPlan: SmartDetectWritePlan | null = null;
@@ -441,7 +448,7 @@ export class ProtectClient {
     });
 
     try {
-      let wrote = await this.writeDevice(camera, payload);
+      let wrote = await this.writeDevice(camera, payload, budget);
       let smartFailed = smartSkipped;
       if (!wrote.ok && wrote.result === 'failed' && payloadHasSmartDetect(payload)) {
         const narrowed = narrowPayload(payload);
@@ -450,7 +457,7 @@ export class ProtectClient {
             `Smart detection update for ${camera.name} was rejected (${wrote.error}). ` +
               `Retrying with the zone fields Protect accepts.`,
           );
-          wrote = await this.writeDevice(camera, narrowed);
+          wrote = await this.writeDevice(camera, narrowed, budget);
         }
       }
       if (!wrote.ok && wrote.result === 'failed' && payloadHasSmartDetect(payload) && controlsRequested) {
@@ -458,7 +465,7 @@ export class ProtectClient {
           `Smart detection update failed for ${camera.name} (${wrote.error}). ` +
             `Motion detection and LED will still be updated.`,
         );
-        wrote = await this.writeDevice(camera, withoutSmartDetect(payload));
+        wrote = await this.writeDevice(camera, withoutSmartDetect(payload), budget);
         smartFailed = true;
         expected.smartDetectConfig = null;
       }
@@ -466,11 +473,11 @@ export class ProtectClient {
         if (wrote.result === 'failed') {
           this.log.error(`Error updating ${camera.name}: ${wrote.error}`);
         }
-        await this.refreshCamera(camera);
+        await this.refreshCamera(camera, budget);
         return done(wrote.result, wantsSmart ? wrote.result : null);
       }
 
-      const readback = await this.readUntilMatch(camera, expected);
+      const readback = await this.readUntilMatch(camera, expected, budget);
       if (readback.camera) {
         this.snapshots.set(camera.id, snapshotFromCamera(readback.camera, this.now(), readback.attempts));
         const controlsMatch =
@@ -568,16 +575,19 @@ export class ProtectClient {
   private async writeDevice(
     camera: ProtectCamera,
     payload: CameraWritePayload,
+    budget: SessionRecoveryBudget,
   ): Promise<{ ok: true } | { ok: false; result: UpdateResult; error: string }> {
     const first = await this.writeDeviceOnce(camera, payload);
     // A rejected PATCH is retried only after the library has logged itself out.
     // The payload sets fixed values, so one retry cannot apply a second change.
-    if (first.ok || !this.sessionLost()) {
+    if (first.ok || !this.sessionLost() || budget.remaining <= 0) {
       return first;
     }
+    budget.remaining -= 1;
     const restored = await this.recoverSession();
     if (restored && this.hasBootstrap() && !this.api.isAdminUser) {
-      return { ok: false, result: 'unauthorized', error: 'account is not a Protect admin' };
+      this.logConfirmedNonAdmin();
+      return { ok: false, result: 'unauthorized', error: 'account cannot change device settings' };
     }
     if (!restored || !this.api.isAdminUser) {
       return { ok: false, result: 'failed', error: first.error };
@@ -618,10 +628,10 @@ export class ProtectClient {
   private async readUntilMatch(
     camera: ProtectCamera,
     expected: MotionReadbackExpectation,
+    budget: SessionRecoveryBudget = { remaining: 1 },
   ): Promise<{ matched: boolean; camera: ProtectCamera | null; attempts: number; error: string | null }> {
     let lastCamera: ProtectCamera | null = null;
     let error: string | null = null;
-    const budget: SessionRecoveryBudget = { remaining: 1 };
 
     for (let index = 0; index < MOTION_READBACK_DELAYS_MS.length; index += 1) {
       const delay = MOTION_READBACK_DELAYS_MS[index] ?? 0;
@@ -699,9 +709,10 @@ export class ProtectClient {
   private async readCameraBeforeChange(
     camera: ProtectCamera,
     includesSmartDetect: boolean,
+    budget: SessionRecoveryBudget,
   ): Promise<ProtectCamera | null> {
     try {
-      const record = await this.fetchCameraRecord(camera);
+      const record = await this.fetchCameraRecord(camera, budget);
       if (record) {
         return record;
       }
@@ -756,7 +767,7 @@ export class ProtectClient {
    * Refreshes a logged-out session before a write. `unauthorized` is returned only
    * when the new bootstrap still says this account cannot change devices.
    */
-  private async ensureWritableSession(): Promise<'ok' | 'unauthorized' | 'failed'> {
+  private async ensureWritableSession(budget: SessionRecoveryBudget): Promise<'ok' | 'unauthorized' | 'failed'> {
     const loggedOut = !this.hasBootstrap();
     if (!loggedOut && this.api.isAdminUser) {
       return 'ok';
@@ -765,14 +776,49 @@ export class ProtectClient {
     if (!loggedOut && this.adminConfirmed && !this.api.isAdminUser) {
       return 'unauthorized';
     }
+    if (budget.remaining <= 0) {
+      return 'failed';
+    }
+    budget.remaining -= 1;
     const restored = await this.recoverSession();
     if (restored && this.hasBootstrap() && !this.api.isAdminUser) {
+      this.logConfirmedNonAdmin();
       return 'unauthorized';
     }
     if (!restored || !this.hasBootstrap() || !this.api.isAdminUser) {
       return 'failed';
     }
     return 'ok';
+  }
+
+  private recoveryBackoffMs(): number {
+    const exponent = Math.max(this.recoveryFailures, 1) - 1;
+    const scaled = RECOVERY_FAILURE_FLOOR_MS * 2 ** exponent;
+    return Math.min(scaled, SESSION_WATCHDOG_MAX_MS);
+  }
+
+  private recoveryBlockedByBackoff(): boolean {
+    return (
+      !this.lastRecoverySucceeded &&
+      this.lastRecoveryAttemptAt !== null &&
+      this.now() - this.lastRecoveryAttemptAt < this.recoveryBackoffMs()
+    );
+  }
+
+  /** Keeps the watchdog from logging in sooner than the write path's failure backoff. */
+  private extendWatchdogAfterFailure(): void {
+    const backoff = this.recoveryBackoffMs();
+    if (backoff <= this.watchdogDelayMs) {
+      return;
+    }
+    this.watchdogDelayMs = backoff;
+    if (this.watchdogTimer) {
+      this.scheduleWatchdog();
+    }
+  }
+
+  private logConfirmedNonAdmin(): void {
+    this.log.warn('UniFi Protect refreshed the session, and this account cannot change device settings.');
   }
 
   private recoverSession(): Promise<boolean> {
@@ -782,11 +828,7 @@ export class ProtectClient {
     if (!this.connected) {
       return Promise.resolve(false);
     }
-    if (
-      !this.lastRecoverySucceeded &&
-      this.lastRecoveryAttemptAt !== null &&
-      this.now() - this.lastRecoveryAttemptAt < RECOVERY_FAILURE_FLOOR_MS
-    ) {
+    if (this.recoveryBlockedByBackoff()) {
       return Promise.resolve(false);
     }
     this.recoveryInFlight = this.recoverSessionOnce().finally(() => {
@@ -806,10 +848,16 @@ export class ProtectClient {
     try {
       const ok = await this.api.getBootstrap();
       if (!this.connected) {
+        // getBootstrap can open the events socket after disconnect() already reset it.
+        this.api.reset();
         return false;
       }
       restored = Boolean(ok && this.api.bootstrap);
     } catch (error) {
+      if (!this.connected) {
+        this.api.reset();
+        return false;
+      }
       this.log.error(`Unable to refresh the UniFi Protect bootstrap: ${errorText(error)}`);
       restored = false;
     }
@@ -826,6 +874,7 @@ export class ProtectClient {
     } else {
       this.recoveryFailures += 1;
       this.adminConfirmed = false;
+      this.extendWatchdogAfterFailure();
       this.log.warn('UniFi Protect session could not be restored. Another attempt will follow.');
     }
     this.emitHealthChange();
@@ -865,11 +914,18 @@ export class ProtectClient {
     }
     try {
       if (!this.hasBootstrap() || !this.eventsWebsocketOpen()) {
-        const restored = await this.recoverSession();
-        this.watchdogDelayMs =
-          restored && this.hasLiveSession
-            ? SESSION_WATCHDOG_BASE_MS
-            : Math.min(this.watchdogDelayMs * 2, SESSION_WATCHDOG_MAX_MS);
+        if (this.recoveryBlockedByBackoff()) {
+          this.watchdogDelayMs = Math.min(
+            Math.max(this.watchdogDelayMs, this.recoveryBackoffMs()),
+            SESSION_WATCHDOG_MAX_MS,
+          );
+        } else {
+          const restored = await this.recoverSession();
+          this.watchdogDelayMs =
+            restored && this.hasLiveSession
+              ? SESSION_WATCHDOG_BASE_MS
+              : Math.min(this.watchdogDelayMs * 2, SESSION_WATCHDOG_MAX_MS);
+        }
       } else {
         this.watchdogDelayMs = SESSION_WATCHDOG_BASE_MS;
       }

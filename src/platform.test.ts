@@ -3,11 +3,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { PlatformAccessory, Service } from 'homebridge';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ProtectMotionPlatform } from './platform.js';
 import { HEALTH_FILENAME } from './settings.js';
 import { createMockAPI, createMockConfig, createMockLogger } from './test/mocks.js';
+
+const openPlatforms: Array<{ emit: (event: string) => void }> = [];
+
+function createdApi(options?: { storagePath: string }): ReturnType<typeof createMockAPI> {
+  const hap = options ? createMockAPI(options) : createMockAPI();
+  openPlatforms.push(hap as unknown as { emit: (event: string) => void });
+  return hap;
+}
+
+afterEach(() => {
+  for (const hap of openPlatforms) {
+    hap.emit('shutdown');
+  }
+  openPlatforms.length = 0;
+});
 
 const apiState = vi.hoisted(() => {
   const listeners = new Map<string, (packet: unknown) => void>();
@@ -92,7 +107,7 @@ describe('ProtectMotionPlatform health', () => {
   });
 
   it('reports effective motion state without credentials and ignores sensor motionSettings', async () => {
-    const hap = createMockAPI();
+    const hap = createdApi();
     const platform = new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -159,7 +174,7 @@ describe('ProtectMotionPlatform health', () => {
 
   it('records an authentication failure without the password', async () => {
     apiState.login.mockResolvedValue(false);
-    const hap = createMockAPI();
+    const hap = createdApi();
     const platform = new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -198,7 +213,7 @@ describe('ProtectMotionPlatform health file', () => {
 
   it('writes a home-monitor-compatible snapshot after bootstrap and marks disconnect on shutdown', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-health-platform-'));
-    const hap = createMockAPI({ storagePath: dir });
+    const hap = createdApi({ storagePath: dir });
     new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
@@ -252,7 +267,7 @@ describe('ProtectMotionPlatform health file', () => {
 
   it('keeps camera health when the Protect session is lost and clears it after recovery', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-health-session-'));
-    const hap = createMockAPI({ storagePath: dir });
+    const hap = createdApi({ storagePath: dir });
     const platform = new ProtectMotionPlatform(
       createMockLogger(),
       createMockConfig({
