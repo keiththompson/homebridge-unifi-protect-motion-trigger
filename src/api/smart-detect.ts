@@ -142,10 +142,10 @@ export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig
 /**
  * Picks the config to keep so the Smart Detection switch can turn it back on.
  * An active camera read replaces the saved snapshot. A disabled read does not.
- * A live camera whose saved types are already gone, and whose only remaining
- * types sit on lists the snapshot left empty, does not replace the snapshot.
- * Recorded enforced types are left out of a new snapshot. Other types on a
- * list the previous snapshot left empty are kept: the user may have enabled them.
+ * A live camera that has lost saved types does not replace the snapshot.
+ * That includes a half-cleared camera whose only remaining type is one the
+ * controller put back. Recorded enforced types are left out of a new snapshot
+ * unless that would leave nothing to restore. Other new types are kept.
  * Settings lists that were already cleared (1.0.11 only cleared those) are kept
  * from the saved snapshot when the live zones are still the user's zones.
  */
@@ -155,6 +155,9 @@ export function retainSmartDetectSnapshot(
   enforced: SmartDetectEnforcedType[] = [],
 ): SmartDetectConfig | null {
   if (live && smartDetectConfigActive(live)) {
+    if (saved && smartDetectConfigActive(saved) && ownedZoneTypesMissing(saved, live)) {
+      return withoutKnownEnforced(cloneSmartDetectConfig(saved), enforced);
+    }
     if (saved && smartDetectConfigActive(saved) && liveHasOnlyUnsavedTypes(saved, live)) {
       return withoutKnownEnforced(cloneSmartDetectConfig(saved), enforced);
     }
@@ -261,41 +264,64 @@ export function smartDetectEffectivelyEnabled(
 }
 
 /**
- * One readback is not evidence that Protect forced a type. A zone that did not
- * clear can be a write that did not apply. Callers confirm with a second clear
- * of that list and {@link confirmedEnforcedTypes}.
+ * Types present after the write that were neither in the payload nor on the
+ * camera before it. An ignored write cannot add a type, so this is the
+ * controller putting one there.
  */
-export function refilledAfterClear(
-  _baseline: SmartDetectConfig,
-  _actual: SmartDetectConfig,
-): SmartDetectEnforcedType[] | null {
-  return null;
+export function addedByController(
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return listSmartDetectEnforcedTypes(written, after)
+    .map((entry) => {
+      const already = new Set(typesForPlace(beforeWrite, entry));
+      return { ...entry, types: entry.types.filter((type) => !already.has(type)) };
+    })
+    .filter((entry) => entry.types.length > 0);
 }
 
 /**
- * Types that were still present after the clear and are still present, with the
- * same values, after clearing that list again.
+ * Types we tried to remove that are still on the camera. A second clear may
+ * still remove them. They are not evidence of enforcement.
  */
-export function confirmedEnforcedTypes(
+export function typesStillOwned(
+  beforeWrite: SmartDetectConfig,
   written: SmartDetectConfig,
-  before: SmartDetectConfig,
   after: SmartDetectConfig,
 ): SmartDetectEnforcedType[] {
-  const beforeExtras = listSmartDetectEnforcedTypes(written, before);
-  const afterExtras = listSmartDetectEnforcedTypes(written, after);
-  const confirmed: SmartDetectEnforcedType[] = [];
-  for (const entry of beforeExtras) {
-    const later = afterExtras.find((candidate) => sameEnforcedPlace(entry, candidate));
-    if (!later) {
-      continue;
-    }
-    const stayed = entry.types.filter((type) => later.types.includes(type));
-    if (stayed.length === 0) {
-      continue;
-    }
-    confirmed.push({ ...entry, types: [...stayed].sort() });
+  const removed = listSmartDetectEnforcedTypes(written, beforeWrite);
+  return removed
+    .map((entry) => {
+      const still = new Set(typesForPlace(after, entry));
+      return { ...entry, types: entry.types.filter((type) => still.has(type)) };
+    })
+    .filter((entry) => entry.types.length > 0);
+}
+
+/** Recorded types that a readback no longer shows. */
+export function enforcedTypesAbsent(
+  enforced: SmartDetectEnforcedType[],
+  actual: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return enforced
+    .map((entry) => {
+      const present = new Set(typesForPlace(actual, entry));
+      return { ...entry, types: entry.types.filter((type) => !present.has(type)) };
+    })
+    .filter((entry) => entry.types.length > 0);
+}
+
+function typesForPlace(config: SmartDetectConfig, entry: SmartDetectEnforcedType): string[] {
+  if (entry.list === 'objectTypes' || entry.list === 'audioTypes' || entry.list === 'autoTrackingObjectTypes') {
+    return config[entry.list];
   }
-  return confirmed;
+  const zones = entry.list === 'secondLensZone' ? config.secondLensZones : config.zones;
+  const zone = zones?.find(
+    (item) =>
+      (entry.zoneId !== null && item.id === entry.zoneId) || (entry.zoneName !== null && item.name === entry.zoneName),
+  );
+  return zone?.objectTypes ?? [];
 }
 
 /** Residuals that are not already recorded as enforced. */
@@ -349,7 +375,11 @@ function withoutKnownEnforced(
   if (!config || enforced.length === 0) {
     return config;
   }
-  return withoutRefilledTypes(config, enforced);
+  const stripped = withoutRefilledTypes(config, enforced);
+  if (smartDetectConfigActive(config) && !smartDetectConfigActive(stripped)) {
+    return config;
+  }
+  return stripped;
 }
 
 /** Snapshot with the refilled types removed, so the next off does not try to clear them. */
@@ -729,6 +759,32 @@ function structuresAlign(baseline: SmartDetectConfig, actual: SmartDetectConfig)
     pairZones(baseline.zones, actual.zones) !== null &&
     pairZones(baseline.secondLensZones, actual.secondLensZones) !== null
   );
+}
+
+function ownedZoneTypesMissing(baseline: SmartDetectConfig, actual: SmartDetectConfig): boolean {
+  return (
+    zonesMissingOwnedTypes(baseline.zones, actual.zones) ||
+    zonesMissingOwnedTypes(baseline.secondLensZones, actual.secondLensZones)
+  );
+}
+
+function zonesMissingOwnedTypes(
+  baseline: SmartDetectZoneSnapshot[] | null,
+  actual: SmartDetectZoneSnapshot[] | null,
+): boolean {
+  if (!baseline) {
+    return false;
+  }
+  for (const zone of baseline) {
+    if (zone.objectTypes.length === 0) {
+      continue;
+    }
+    const candidate = actual?.find((item) => zoneStructureEqual(zone, item) || sameZoneIdentity(zone, item));
+    if (!candidate || !typesPresent(zone.objectTypes, candidate.objectTypes)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function smartDetectOwnedTypesRemain(baseline: SmartDetectConfig, actual: SmartDetectConfig): boolean {

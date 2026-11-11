@@ -17,7 +17,8 @@ import {
   readMotionDiagnostics,
 } from './motion-state.js';
 import {
-  confirmedEnforcedTypes,
+  addedByController,
+  enforcedTypesAbsent,
   listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
   novelResidualTypes,
@@ -31,6 +32,7 @@ import {
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
+  typesStillOwned,
   withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
 } from './smart-detect.js';
@@ -510,8 +512,15 @@ export class ProtectClient {
       const readback = await this.readUntilMatch(camera, expected, budget);
       let observed = readback.camera;
       let droppedRefill = false;
-      if (observed && settings.smartDetect === false && smartPlan?.expectedConfig && !smartFailed) {
-        const confirmedCamera = await this.confirmEnforcedTypes(camera, smartPlan, observed, expected, budget);
+      if (observed && settings.smartDetect === false && smartPlan?.expectedConfig && liveCamera && !smartFailed) {
+        const confirmedCamera = await this.confirmEnforcedTypes(
+          camera,
+          smartPlan,
+          liveCamera,
+          observed,
+          expected,
+          budget,
+        );
         if (confirmedCamera) {
           observed = confirmedCamera.camera;
           if (confirmedCamera.dropped) {
@@ -519,6 +528,9 @@ export class ProtectClient {
             droppedRefill = true;
           }
         }
+      }
+      if (observed) {
+        this.dropAbsentEnforcedTypes(camera, readSmartDetectConfig(observed));
       }
       if (observed) {
         this.snapshots.set(camera.id, snapshotFromCamera(observed, this.now(), readback.attempts));
@@ -614,13 +626,14 @@ export class ProtectClient {
   }
 
   /**
-   * A list that still has types after a clear is cleared once more. Types that
-   * come back the same are recorded and removed from the snapshot. A list that
-   * clears on the second write is not enforced.
+   * Types the controller adds to a list this write left empty are recorded.
+   * Types that were already there are cleared once more. If they remain, the
+   * readback does not match and the snapshot is left alone.
    */
   private async confirmEnforcedTypes(
     camera: ProtectCamera,
     plan: SmartDetectWritePlan,
+    beforeWriteCamera: ProtectCamera,
     observed: ProtectCamera,
     expected: MotionReadbackExpectation,
     budget: SessionRecoveryBudget,
@@ -628,40 +641,58 @@ export class ProtectClient {
     if (!plan.expectedConfig) {
       return null;
     }
-    const before = readSmartDetectConfig(observed);
-    const residuals = novelResidualTypes(
-      listSmartDetectEnforcedTypes(plan.expectedConfig, before),
+    const beforeWrite = readSmartDetectConfig(beforeWriteCamera);
+    const written = plan.expectedConfig;
+    let current = observed;
+    const stuck = novelResidualTypes(
+      typesStillOwned(beforeWrite, written, readSmartDetectConfig(current)),
       this.enforcedTypes(camera),
     );
     const follow: CameraWritePayload = {};
-    applySmartPatch(follow, patchForResidualLists(plan.patch, residuals));
-    if (!payloadHasSmartDetect(follow)) {
-      return null;
+    applySmartPatch(follow, patchForResidualLists(plan.patch, stuck));
+    if (payloadHasSmartDetect(follow)) {
+      const wrote = await this.writeDevice(camera, follow, budget);
+      if (wrote.ok) {
+        const again = await this.fetchCameraRecord(camera, budget);
+        if (again) {
+          current = again;
+        }
+      }
     }
-    const wrote = await this.writeDevice(camera, follow, budget);
-    if (!wrote.ok) {
-      return null;
+    const added = novelResidualTypes(
+      addedByController(beforeWrite, written, readSmartDetectConfig(current)),
+      this.enforcedTypes(camera),
+    );
+    if (added.length === 0) {
+      return { camera: current, config: null, dropped: false };
     }
-    const again = await this.fetchCameraRecord(camera, budget);
-    if (!again) {
-      return null;
-    }
-    const confirmed = confirmedEnforcedTypes(plan.expectedConfig, before, readSmartDetectConfig(again));
-    if (confirmed.length === 0) {
-      return { camera: again, config: null, dropped: false };
-    }
-    this.persistEnforcedTypes(camera, confirmed);
+    this.persistEnforcedTypes(camera, added);
     const baseline = expected.smartDetectBaseline;
     if (!baseline) {
-      return { camera: again, config: null, dropped: false };
+      return { camera: current, config: null, dropped: false };
     }
-    const stripped = withoutRefilledTypes(baseline, confirmed);
-    if (smartDetectConfigsEqual(stripped, baseline)) {
-      return { camera: again, config: baseline, dropped: false };
+    const stripped = withoutRefilledTypes(baseline, added);
+    if (
+      (smartDetectConfigActive(baseline) && !smartDetectConfigActive(stripped)) ||
+      smartDetectConfigsEqual(stripped, baseline)
+    ) {
+      return { camera: current, config: baseline, dropped: false };
     }
     this.persistSmartDetectSnapshot(camera, stripped);
     expected.smartDetectBaseline = stripped;
-    return { camera: again, config: stripped, dropped: true };
+    return { camera: current, config: stripped, dropped: true };
+  }
+
+  private dropAbsentEnforcedTypes(camera: ProtectCamera, actual: SmartDetectConfig): void {
+    const absent = enforcedTypesAbsent(this.enforcedTypes(camera), actual);
+    if (absent.length === 0 || !this.smartDetectStore || !this.controllerAddress) {
+      return;
+    }
+    try {
+      this.smartDetectStore.dropEnforced(this.controllerAddress, camera.id, absent);
+    } catch (error) {
+      this.log.error(`Could not update enforced smart detection types for ${camera.name}: ${errorText(error)}`);
+    }
   }
 
   private persistEnforcedTypes(camera: ProtectCamera, enforced: SmartDetectEnforcedType[]): void {

@@ -8,14 +8,14 @@ import {
   smartDetectDrift,
 } from './motion-state.js';
 import {
-  confirmedEnforcedTypes,
+  addedByController,
   listSmartDetectEnforcedTypes,
   planSmartDetectWrite,
-  refilledAfterClear,
   sanitizeSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectObligationMet,
   type SmartDetectZoneSnapshot,
+  typesStillOwned,
 } from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
 
@@ -319,30 +319,28 @@ describe('motion state', () => {
     expect(smartDetectObligationMet(true, saved, added)).toBe(false);
   });
 
-  it('does not treat one uncleared readback as proof a controller forced the type', () => {
-    const poisoned = dualLensConfig(['person', 'vehicle'], ['package']);
-    const refilled = dualLensConfig([], ['package']);
-    const yardAndDrive = dualLensConfig(['person'], ['vehicle']);
-    yardAndDrive.secondLensZones = null;
-    const driveStayed = dualLensConfig([], ['vehicle']);
-    driveStayed.secondLensZones = null;
-    const secondPerson = dualLensConfig(['person', 'vehicle'], ['person']);
+  it('counts a type as enforced only when the controller adds it', () => {
+    const empty = dualLensConfig([], []);
+    const beforeEmpty = dualLensConfig(['person', 'vehicle'], []);
+    const packageAdded = dualLensConfig([], ['package']);
+    const packageAlready = dualLensConfig(['person', 'vehicle'], ['package']);
 
-    expect(refilledAfterClear(poisoned, refilled)).toBeNull();
-    expect(refilledAfterClear(secondPerson, dualLensConfig([], ['person']))).toBeNull();
-    expect(refilledAfterClear(yardAndDrive, driveStayed)).toBeNull();
-  });
-
-  it('confirms a type only when clearing that list again leaves it in place', () => {
-    const written = dualLensConfig([], []);
-    const before = dualLensConfig([], ['package']);
-    const stillThere = dualLensConfig([], ['package']);
-    const cleared = dualLensConfig([], []);
-
-    expect(confirmedEnforcedTypes(written, before, stillThere)).toEqual([
+    expect(addedByController(beforeEmpty, empty, packageAdded)).toEqual([
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
-    expect(confirmedEnforcedTypes(written, before, cleared)).toEqual([]);
+    expect(addedByController(packageAlready, empty, packageAdded)).toEqual([]);
+    expect(typesStillOwned(packageAlready, empty, packageAdded)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+  });
+
+  it('does not replace a snapshot with a half-cleared camera', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], ['package']);
+    const halfOff = dualLensConfig([], ['package']);
+    const plan = planSmartDetectWrite(false, cameraFromConfig('Entrance Doorbell', halfOff), saved);
+
+    expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(plan.config?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
   });
 
   it('unwraps a zone raw that was nested by an earlier snapshot', () => {

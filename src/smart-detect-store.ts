@@ -102,7 +102,7 @@ export class SmartDetectSnapshotStore {
     return (stored?.enforced ?? []).map((entry) => ({ ...entry, types: [...entry.types] }));
   }
 
-  /** Records types that came back unchanged from a second clear of the same list. */
+  /** Records types the controller added to a list this plugin wrote without them. */
   public rememberEnforced(
     controllerAddress: string,
     cameraId: string,
@@ -123,6 +123,21 @@ export class SmartDetectSnapshotStore {
     if (name) {
       existing.name = name;
     }
+    this.flush();
+  }
+
+  /** Drops recorded types that a later read no longer shows. */
+  public dropEnforced(controllerAddress: string, cameraId: string, absent: SmartDetectEnforcedType[]): void {
+    this.ensureLoaded();
+    const existing = this.cameras.get(storageKey(controllerAddress, cameraId));
+    if (!existing || absent.length === 0 || existing.enforced.length === 0) {
+      return;
+    }
+    const next = subtractEnforced(existing.enforced, absent);
+    if (enforcedEqual(existing.enforced, next)) {
+      return;
+    }
+    existing.enforced = next;
     this.flush();
   }
 
@@ -297,6 +312,28 @@ function sanitizeEnforced(value: unknown): SmartDetectEnforcedType[] {
     });
   }
   return enforced;
+}
+
+function subtractEnforced(
+  current: SmartDetectEnforcedType[],
+  absent: SmartDetectEnforcedType[],
+): SmartDetectEnforcedType[] {
+  const next: SmartDetectEnforcedType[] = [];
+  for (const entry of current) {
+    const gone = absent.find(
+      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
+    );
+    if (!gone) {
+      next.push({ ...entry, types: [...entry.types] });
+      continue;
+    }
+    const drop = new Set(gone.types);
+    const types = entry.types.filter((type) => !drop.has(type));
+    if (types.length > 0) {
+      next.push({ ...entry, types });
+    }
+  }
+  return next;
 }
 
 function mergeEnforced(
