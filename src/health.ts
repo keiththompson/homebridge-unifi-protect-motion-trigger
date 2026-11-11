@@ -6,8 +6,10 @@ import { motionDrift, readMotionDiagnostics, smartDetectDrift } from './api/moti
 import {
   cloneSmartDetectConfig,
   disableSmartDetect,
+  listSmartDetectEnforcedTypes,
   type SmartDetectConfig,
   smartDetectConfigActive,
+  type SmartDetectEnforcedType,
   type SmartDetectZoneSnapshot,
 } from './api/smart-detect.js';
 import type { ProtectCamera, SmartDetectPreferences } from './api/types.js';
@@ -16,8 +18,10 @@ import { HEALTH_FILENAME } from './settings.js';
 /**
  * Health document.
  * 1.1.0 added readback and drift. 1.2.0 adds smart-detection expected, actual,
- * and drift on each camera. A lost Protect session reuses `connected` and
- * `lastError`; no fields were added.
+ * and drift on each camera. `smartDetectEnforcedTypes` lists types a controller
+ * keeps that are not in the saved snapshot. Older readers ignore that field,
+ * so the schema version stays 1.2.0. A lost Protect session reuses `connected`
+ * and `lastError`.
  */
 export const HEALTH_SCHEMA_VERSION = '1.2.0' as const;
 
@@ -79,8 +83,15 @@ export interface CameraHealth {
   /**
    * True when expected and actual smart detection disagree.
    * Null when either side is unknown. Independent of the motion-flag half of `drift`.
+   * Types listed in `smartDetectEnforcedTypes` are not drift.
    */
   smartDetectDrift: boolean | null;
+  /**
+   * Types on the last camera read that are not in the saved snapshot.
+   * Empty when the read was compared and had none. Null when there is no snapshot
+   * or no camera read to compare.
+   */
+  smartDetectEnforcedTypes: SmartDetectEnforcedType[] | null;
   /**
    * True when the HomeKit switch and the last successful read disagree,
    * including smart detection. Null when the motion flag is unknown.
@@ -287,7 +298,7 @@ function snapshotFromDiagnostics(
 function smartDetectFields(
   camera: HealthCameraInput,
   snapshot: CameraReadbackSnapshot | null,
-): Pick<CameraHealth, 'smartDetectExpected' | 'smartDetectActual' | 'smartDetectDrift'> {
+): Pick<CameraHealth, 'smartDetectExpected' | 'smartDetectActual' | 'smartDetectDrift' | 'smartDetectEnforcedTypes'> {
   const actual = snapshot?.ok ? snapshot.smartDetectConfig : null;
   const saved = camera.smartDetectSnapshot;
   const expected = expectedSmartDetect(camera.intendedSmartDetect, saved, actual);
@@ -295,6 +306,7 @@ function smartDetectFields(
     smartDetectExpected: toSmartDetectHealthState(expected),
     smartDetectActual: toSmartDetectHealthState(actual),
     smartDetectDrift: smartDetectDrift(camera.intendedSmartDetect, actual, saved),
+    smartDetectEnforcedTypes: saved && actual ? listSmartDetectEnforcedTypes(saved, actual) : null,
   };
 }
 
@@ -362,6 +374,7 @@ function emptyCameraHealth(camera: HealthCameraInput): CameraHealth {
     smartDetectExpected: null,
     smartDetectActual: null,
     smartDetectDrift: null,
+    smartDetectEnforcedTypes: null,
     drift: null,
     readback: {
       status: 'unknown',

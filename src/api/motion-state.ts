@@ -1,9 +1,9 @@
 import type { SmartDetectConfig } from './smart-detect.js';
 import {
-  disableSmartDetect,
   preferencesFromConfig,
   readSmartDetectConfig,
   smartDetectConfigActive,
+  smartDetectObligationMet,
   smartDetectStateMatches,
 } from './smart-detect.js';
 import type { ProtectCamera, SmartDetectPreferences } from './types.js';
@@ -36,6 +36,13 @@ export interface MotionReadbackExpectation {
   led?: boolean;
   smartDetect: SmartDetectPreferences | null;
   smartDetectConfig?: SmartDetectConfig | null;
+  /**
+   * Saved user snapshot. Types the controller adds on lists this snapshot left
+   * empty do not fail the readback. Exact list equality is used when this is absent.
+   */
+  smartDetectBaseline?: SmartDetectConfig | null;
+  /** True when restoring the snapshot. False when clearing the snapshot's types. */
+  smartDetectEnabling?: boolean;
 }
 
 export function smartDetectListsEqual(left: SmartDetectPreferences, right: SmartDetectPreferences): boolean {
@@ -86,7 +93,11 @@ export function motionReadbackMatches(camera: ProtectCamera, expected: MotionRea
 
   if (expected.smartDetectConfig) {
     const live = readSmartDetectConfig(camera);
-    if (!smartDetectStateMatches(expected.smartDetectConfig, live)) {
+    if (expected.smartDetectBaseline) {
+      if (!smartDetectObligationMet(expected.smartDetectEnabling === true, expected.smartDetectBaseline, live)) {
+        return false;
+      }
+    } else if (!smartDetectStateMatches(expected.smartDetectConfig, live)) {
       return false;
     }
   } else if (expected.smartDetect) {
@@ -130,17 +141,17 @@ export function smartDetectDrift(
   }
 
   if (!intendedSmartDetect) {
+    if (saved && smartDetectConfigActive(saved)) {
+      return !smartDetectObligationMet(false, saved, actual);
+    }
     if (smartDetectConfigActive(actual)) {
       return true;
-    }
-    if (saved && smartDetectConfigActive(saved)) {
-      return !smartDetectStateMatches(disableSmartDetect(saved), actual);
     }
     return false;
   }
 
   if (saved && smartDetectConfigActive(saved)) {
-    return !smartDetectStateMatches(saved, actual);
+    return !smartDetectObligationMet(true, saved, actual);
   }
 
   return !smartDetectConfigActive(actual);

@@ -153,6 +153,108 @@ describe('health report', () => {
     });
   });
 
+  it('does not call controller-added types on an empty saved list drift', () => {
+    const saved = {
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Entrance',
+          points: [
+            [0, 0],
+            [1, 0],
+            [1, 1],
+          ],
+          sensitivity: 70,
+          objectTypes: ['person', 'vehicle'],
+          raw: { id: 1, name: 'Entrance', sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+        },
+      ],
+      secondLensZones: [
+        {
+          id: 2,
+          name: 'Down',
+          points: [
+            [0.1, 0.8],
+            [0.9, 0.8],
+            [0.9, 1],
+          ],
+          sensitivity: 40,
+          objectTypes: [],
+          raw: { id: 2, name: 'Down', sensitivity: 40, objectTypes: [] },
+        },
+      ],
+    };
+    const live = {
+      id: 'cam1',
+      name: 'Entrance Doorbell',
+      recordingSettings: { enableMotionDetection: true },
+      motionSettings: null,
+      smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
+      smartDetectZones: [
+        {
+          id: 1,
+          name: 'Entrance',
+          points: [
+            [0, 0],
+            [1, 0],
+            [1, 1],
+          ],
+          sensitivity: 70,
+          objectTypes: [],
+        },
+      ],
+      secondLensSmartDetectZones: [
+        {
+          id: 2,
+          name: 'Down',
+          points: [
+            [0.1, 0.8],
+            [0.9, 0.8],
+            [0.9, 1],
+          ],
+          sensitivity: 40,
+          objectTypes: ['package'],
+        },
+      ],
+    } as unknown as ProtectCamera;
+    const health = buildHealthReport({
+      pluginVersion: '1.0.13',
+      generatedAt: now,
+      controllers: [
+        {
+          address: '10.0.0.5',
+          connected: true,
+          throttled: false,
+          admin: true,
+          lastError: null,
+          cameras: [
+            {
+              id: 'cam1',
+              name: 'Entrance Doorbell',
+              intendedMotionEnabled: true,
+              smartDetectPreferencesSaved: true,
+              intendedSmartDetect: false,
+              smartDetectSnapshot: saved,
+              snapshot: snapshotFromCamera(live, now, 1),
+            },
+          ],
+        },
+      ],
+    });
+    const cameraHealth = health.controllers[0]?.cameras[0];
+
+    expect(cameraHealth?.smartDetectDrift).toBe(false);
+    expect(cameraHealth?.drift).toBe(false);
+    expect(cameraHealth?.readback.status).toBe('verified');
+    expect(cameraHealth?.smartDetectEnforcedTypes).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+  });
+
   it('marks an old successful read stale without turning it into a fresh verification', () => {
     const health = report(snapshotFromCamera(camera, now, 1), true, now + 5 * 60 * 1000 + 1);
     const cameraHealth = health.controllers[0]?.cameras[0];

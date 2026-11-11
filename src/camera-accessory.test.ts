@@ -301,6 +301,73 @@ describe('CameraAccessory motion lifecycle', () => {
     expect((cached.smartDetectZones?.[0] as { objectTypes: string[] }).objectTypes).toEqual([]);
   });
 
+  it('stays off when a later event only carries types the saved snapshot did not have', () => {
+    const accessory = createMockAccessory('Entrance Doorbell', 'uuid-door');
+    const points = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ];
+    const downPoints = [
+      [0.1, 0.8],
+      [0.9, 0.8],
+      [0.9, 1],
+    ];
+    const live = camera(true);
+    live.name = 'Entrance Doorbell';
+    live.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
+    live.smartDetectZones = [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: [] }];
+    live.secondLensSmartDetectZones = [
+      { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
+    ];
+    accessory.context.camera = live;
+    accessory.context.smartDetectConfig = {
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Entrance',
+          points,
+          sensitivity: 70,
+          objectTypes: ['person', 'vehicle'],
+          raw: { id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+        },
+      ],
+      secondLensZones: [
+        {
+          id: 2,
+          name: 'Down',
+          points: downPoints,
+          sensitivity: 40,
+          objectTypes: [],
+          raw: { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: [] },
+        },
+      ],
+    };
+    const cameraAccessory = new CameraAccessory(platform(), accessory, {} as ProtectClient, 10);
+
+    expect(cameraAccessory.smartDetectState).toBe(false);
+    expect(namedSwitch(accessory, 'smart-detect-switch').invokeGet()).toBe(false);
+
+    cameraAccessory.handleSmartDetectUpdate({
+      secondLensSmartDetectZones: [
+        { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
+      ],
+    });
+    expect(cameraAccessory.smartDetectState).toBe(false);
+
+    cameraAccessory.handleSmartDetectUpdate({
+      smartDetectZones: [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] }],
+      secondLensSmartDetectZones: [
+        { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
+      ],
+    });
+    expect(cameraAccessory.smartDetectState).toBe(true);
+  });
+
   it('removes a Smart Detection service that was already added when the switch is hidden', () => {
     const accessory = createMockAccessory('Front Door', 'uuid-1');
     accessory.context.camera = camera(true);

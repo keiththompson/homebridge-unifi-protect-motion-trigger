@@ -2,7 +2,7 @@ import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformCo
 
 import { ProtectClient } from './api/client.js';
 import { ProtectApiError } from './api/errors.js';
-import { smartDetectConfigActive } from './api/smart-detect.js';
+import { sanitizeSmartDetectConfig, smartDetectConfigActive } from './api/smart-detect.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
 import type { HealthControllerInput, PluginHealth } from './health.js';
@@ -333,6 +333,23 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     }
   }
 
+  /**
+   * Homebridge keeps the snapshot on the accessory. The file is the copy that
+   * survives when that cache does not, so a restart can still tell controller-added
+   * types apart from the user's saved types.
+   */
+  private seedSmartDetectSnapshot(address: string, accessory: PlatformAccessory, cameraId: string): void {
+    const stored = this.smartDetectStore.get(address, cameraId);
+    if (!stored) {
+      return;
+    }
+    const current = sanitizeSmartDetectConfig(accessory.context.smartDetectConfig);
+    if (current && smartDetectConfigActive(current)) {
+      return;
+    }
+    accessory.context.smartDetectConfig = stored;
+  }
+
   private configureCameras(client: ProtectClient, cameras: ProtectCamera[], controllerAddress: string): void {
     for (const camera of cameras) {
       const uuid = this.api.hap.uuid.generate(`${controllerAddress}:${camera.id}`);
@@ -351,6 +368,7 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
       accessory.context.camera = camera;
       accessory.context.controllerAddress = controllerAddress;
+      this.seedSmartDetectSnapshot(controllerAddress, accessory, camera.id);
 
       const cameraAccessory = new CameraAccessory(this, accessory, client, this.motionDuration);
 

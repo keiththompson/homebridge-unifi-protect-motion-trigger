@@ -7,7 +7,13 @@ import {
   readMotionDiagnostics,
   smartDetectDrift,
 } from './motion-state.js';
-import { planSmartDetectWrite, type SmartDetectConfig } from './smart-detect.js';
+import {
+  listSmartDetectEnforcedTypes,
+  planSmartDetectWrite,
+  type SmartDetectConfig,
+  smartDetectObligationMet,
+  type SmartDetectZoneSnapshot,
+} from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
 
 const camera = {
@@ -257,6 +263,41 @@ describe('motion state', () => {
     expect(restored.patch.smartDetectZones?.[0]).toMatchObject({ sensitivity: 75, objectTypes: ['person'] });
   });
 
+  it('accepts controller-added types on a list the snapshot left empty', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], []);
+    const cleared = dualLensConfig([], ['package']);
+
+    expect(smartDetectObligationMet(false, saved, cleared)).toBe(true);
+    expect(smartDetectObligationMet(true, saved, dualLensConfig(['person', 'vehicle'], ['package']))).toBe(true);
+    expect(smartDetectObligationMet(true, saved, dualLensConfig(['person', 'vehicle'], []))).toBe(true);
+    expect(listSmartDetectEnforcedTypes(saved, cleared)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+    expect(smartDetectDrift(false, cleared, saved)).toBe(false);
+    expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], ['package']), saved)).toBe(false);
+    expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], []), saved)).toBe(false);
+
+    const again = planSmartDetectWrite(false, cameraFromConfig('Entrance Doorbell', cleared), saved);
+    expect(again.patch).toEqual({});
+    expect(again.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(again.config?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+
+    const restored = planSmartDetectWrite(true, cameraFromConfig('Entrance Doorbell', cleared), saved);
+    expect(restored.patch.smartDetectZones?.[0]).toMatchObject({ objectTypes: ['person', 'vehicle'] });
+    expect(restored.patch.secondLensSmartDetectZones?.[0]).toMatchObject({ objectTypes: [] });
+  });
+
+  it('still reports drift when a saved type remains or a configured zone gains a type', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], []);
+    const stillOn = dualLensConfig(['person', 'vehicle'], ['package']);
+    const added = dualLensConfig(['person', 'vehicle', 'animal'], []);
+
+    expect(smartDetectDrift(false, stillOn, saved)).toBe(true);
+    expect(smartDetectDrift(true, added, saved)).toBe(true);
+    expect(smartDetectObligationMet(false, saved, stillOn)).toBe(false);
+    expect(smartDetectObligationMet(true, saved, added)).toBe(false);
+  });
+
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {
     const saved = planSmartDetectWrite(
       false,
@@ -327,6 +368,67 @@ function cameraWithZone(
         mergeId: 'read-only',
       },
     ],
+  };
+}
+
+function dualLensConfig(mainTypes: string[], secondTypes: string[]): SmartDetectConfig {
+  const mainPoints = [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+  ];
+  const secondPoints = [
+    [0.1, 0.8],
+    [0.9, 0.8],
+    [0.9, 1],
+  ];
+  return {
+    objectTypes: [],
+    audioTypes: [],
+    autoTrackingObjectTypes: [],
+    settingsPresent: true,
+    zones: [zoneSnapshot(1, 'Entrance', 70, mainTypes, mainPoints)],
+    secondLensZones: [zoneSnapshot(2, 'Down', 40, secondTypes, secondPoints)],
+  };
+}
+
+function zoneSnapshot(
+  id: number,
+  name: string,
+  sensitivity: number,
+  objectTypes: string[],
+  points: number[][],
+): SmartDetectZoneSnapshot {
+  return {
+    id,
+    name,
+    points,
+    sensitivity,
+    objectTypes: [...objectTypes],
+    raw: { id, name, points, sensitivity, objectTypes: [...objectTypes] },
+  };
+}
+
+function cameraFromConfig(name: string, config: SmartDetectConfig): ProtectCamera {
+  return {
+    id: name,
+    name,
+    type: 'UVC G4 Doorbell Pro PoE',
+    mac: 'AA:BB:CC:DD:EE:FF',
+    host: '192.168.1.50',
+    lastMotion: null,
+    recordingSettings: { enableMotionDetection: true, mode: 'always' },
+    motionSettings: null,
+    smartDetectSettings: {
+      objectTypes: [...config.objectTypes],
+      audioTypes: [...config.audioTypes],
+      autoTrackingObjectTypes: [...config.autoTrackingObjectTypes],
+    },
+    smartDetectZones: config.zones?.map((zone) => ({ ...zone.raw, objectTypes: [...zone.objectTypes] })),
+    secondLensSmartDetectZones: config.secondLensZones?.map((zone) => ({
+      ...zone.raw,
+      objectTypes: [...zone.objectTypes],
+    })),
   };
 }
 

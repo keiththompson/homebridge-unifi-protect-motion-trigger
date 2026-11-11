@@ -6,7 +6,8 @@ import type { PlatformAccessory, Service } from 'homebridge';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ProtectMotionPlatform } from './platform.js';
-import { HEALTH_FILENAME } from './settings.js';
+import { HEALTH_FILENAME, SMART_DETECT_SNAPSHOT_FILENAME } from './settings.js';
+import { SmartDetectSnapshotStore } from './smart-detect-store.js';
 import { createMockAPI, createMockConfig, createMockLogger } from './test/mocks.js';
 
 const openPlatforms: Array<{ emit: (event: string) => void }> = [];
@@ -104,6 +105,9 @@ describe('ProtectMotionPlatform health', () => {
       audioTypes: [],
       autoTrackingObjectTypes: [],
     };
+    delete (apiState.camera as { smartDetectZones?: unknown }).smartDetectZones;
+    delete (apiState.camera as { secondLensSmartDetectZones?: unknown }).secondLensSmartDetectZones;
+    apiState.api.updateDevice.mockClear();
   });
 
   it('reports effective motion state without credentials and ignores sensor motionSettings', async () => {
@@ -172,6 +176,90 @@ describe('ProtectMotionPlatform health', () => {
     expect(apiState.api.updateDevice).not.toHaveBeenCalled();
   });
 
+  it('stays off after restart when the controller left a type on an empty second lens', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-restart-'));
+    const entrance = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ];
+    const down = [
+      [0.1, 0.8],
+      [0.9, 0.8],
+      [0.9, 1],
+    ];
+    new SmartDetectSnapshotStore(() => dir).remember('10.0.0.5', 'cam1', 'Front Door', {
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Entrance',
+          points: entrance,
+          sensitivity: 70,
+          objectTypes: ['person', 'vehicle'],
+          raw: { id: 1, name: 'Entrance', points: entrance, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+        },
+      ],
+      secondLensZones: [
+        {
+          id: 2,
+          name: 'Down',
+          points: down,
+          sensitivity: 40,
+          objectTypes: [],
+          raw: { id: 2, name: 'Down', points: down, sensitivity: 40, objectTypes: [] },
+        },
+      ],
+    });
+    apiState.camera.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
+    Object.assign(apiState.camera, {
+      smartDetectZones: [{ id: 1, name: 'Entrance', points: entrance, sensitivity: 70, objectTypes: [] }],
+      secondLensSmartDetectZones: [{ id: 2, name: 'Down', points: down, sensitivity: 40, objectTypes: ['package'] }],
+    });
+
+    const hap = createdApi({ storagePath: dir });
+    const platform = new ProtectMotionPlatform(
+      createMockLogger(),
+      createMockConfig({
+        controllers: [{ address: '10.0.0.5', username: 'homebridge-user', password: 'super-secret-password' }],
+      }),
+      hap,
+    );
+    (hap as unknown as { emit: (event: string) => void }).emit('didFinishLaunching');
+    await vi.waitFor(async () => {
+      const health = await platform.getHealth();
+      expect(health.controllers[0]?.cameras).toHaveLength(1);
+    });
+
+    const created = (hap.platformAccessory as unknown as { mock: { results: { value: PlatformAccessory }[] } }).mock
+      .results[0]?.value;
+    const smart = (
+      created as PlatformAccessory & { getServiceBySubtype: (subtype: string) => Service }
+    ).getServiceBySubtype('smart-detect-switch');
+    expect(
+      (smart.getCharacteristic('On' as unknown as never) as unknown as { invokeGet: () => unknown }).invokeGet(),
+    ).toBe(false);
+    expect(apiState.api.updateDevice).not.toHaveBeenCalled();
+
+    const health = await platform.getHealth();
+    expect(health.controllers[0]?.cameras[0]).toMatchObject({
+      smartDetectDrift: false,
+      drift: false,
+      smartDetectEnforcedTypes: [{ list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] }],
+      readback: { status: 'verified' },
+    });
+    const saved = JSON.parse(readFileSync(join(dir, SMART_DETECT_SNAPSHOT_FILENAME), 'utf8')) as {
+      cameras: Array<{
+        config: { zones: Array<{ objectTypes: string[] }>; secondLensZones: Array<{ objectTypes: string[] }> };
+      }>;
+    };
+    expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual([]);
+  });
+
   it('records an authentication failure without the password', async () => {
     apiState.login.mockResolvedValue(false);
     const hap = createdApi();
@@ -209,6 +297,8 @@ describe('ProtectMotionPlatform health file', () => {
       audioTypes: [],
       autoTrackingObjectTypes: [],
     };
+    delete (apiState.camera as { smartDetectZones?: unknown }).smartDetectZones;
+    delete (apiState.camera as { secondLensSmartDetectZones?: unknown }).secondLensSmartDetectZones;
   });
 
   it('writes a home-monitor-compatible snapshot after bootstrap and marks disconnect on shutdown', async () => {
