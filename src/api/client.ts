@@ -22,11 +22,13 @@ import {
   planSmartDetectWrite,
   preferencesFromConfig,
   readSmartDetectConfig,
+  refilledAfterClear,
   type SmartDetectConfig,
   smartDetectConfigActive,
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
+  withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
 } from './smart-detect.js';
 import type {
@@ -426,7 +428,7 @@ export class ProtectClient {
       }
     }
 
-    const config = smartPlan?.config ?? keptConfig;
+    let config = smartPlan?.config ?? keptConfig;
     const controlsRequested = wantsLed || wantsMotion;
     if (smartSkipped && !controlsRequested) {
       return finish('failed', 'failed', config);
@@ -528,6 +530,15 @@ export class ProtectClient {
           );
         }
         if ((!controlsRequested || controlsMatch) && (!wantsSmart || smartResult === 'ok')) {
+          let droppedRefill = false;
+          if (settings.smartDetect === false && readback.camera && config) {
+            const refilled = refilledAfterClear(config, readSmartDetectConfig(readback.camera));
+            if (refilled) {
+              config = withoutRefilledTypes(config, refilled);
+              this.persistSmartDetectSnapshot(camera, config);
+              droppedRefill = true;
+            }
+          }
           if (settings.smartDetect === true && readback.camera) {
             const confirmed = readSmartDetectConfig(readback.camera);
             const cleaned = config ? withoutUnsavedSmartDetectTypes(confirmed, config) : confirmed;
@@ -535,7 +546,7 @@ export class ProtectClient {
               this.persistSmartDetectSnapshot(camera, cleaned);
             }
           }
-          this.log.info(this.confirmedReadbackMessage(camera, changes, config, readback.camera));
+          this.log.info(this.confirmedReadbackMessage(camera, changes, config, readback.camera, droppedRefill));
         }
         const result = controlsRequested ? controlResult : (smartResult ?? 'failed');
         return done(result, smartResult, readback.camera);
@@ -992,6 +1003,7 @@ export class ProtectClient {
     changes: string[],
     baseline: SmartDetectConfig | null,
     actual: ProtectCamera | null,
+    droppedRefill: boolean,
   ): string {
     const confirmed = `${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`;
     if (!baseline || !actual) {
@@ -1001,9 +1013,12 @@ export class ProtectClient {
     if (enforced.length === 0) {
       return confirmed;
     }
+    const snapshotNote = droppedRefill
+      ? 'Those types were removed from the saved snapshot.'
+      : 'The saved snapshot was not changed.';
     return (
       `${confirmed}. Protect kept smart-detection types this plugin did not save ` +
-      `(${formatEnforcedTypes(enforced)}). The saved snapshot was not changed.`
+      `(${formatEnforcedTypes(enforced)}). ${snapshotNote}`
     );
   }
 

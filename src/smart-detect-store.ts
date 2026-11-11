@@ -111,7 +111,11 @@ export class SmartDetectSnapshotStore {
       return;
     }
     this.cameras.clear();
+    let healedNesting = false;
     for (const entry of (parsed as { cameras: unknown[] }).cameras) {
+      if (entryHasNestedZoneRaw(entry)) {
+        healedNesting = true;
+      }
       const stored = sanitizeEntry(entry);
       if (!stored) {
         continue;
@@ -120,6 +124,11 @@ export class SmartDetectSnapshotStore {
     }
     this.loadedFrom = dir;
     this.loadErrorLogged = false;
+    // A re-parsed snapshot used to wrap the previous raw inside the new one.
+    // Rewrite once so the file stops growing.
+    if (healedNesting) {
+      this.flush();
+    }
   }
 
   private warnUnreadable(message: string): void {
@@ -159,6 +168,31 @@ export class SmartDetectSnapshotStore {
       throw error;
     }
   }
+}
+
+function entryHasNestedZoneRaw(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const config = (value as { config?: unknown }).config;
+  if (!config || typeof config !== 'object') {
+    return false;
+  }
+  const record = config as { zones?: unknown; secondLensZones?: unknown };
+  return zoneListHasNestedRaw(record.zones) || zoneListHasNestedRaw(record.secondLensZones);
+}
+
+function zoneListHasNestedRaw(value: unknown): boolean {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  return value.some((zone) => {
+    if (!zone || typeof zone !== 'object') {
+      return false;
+    }
+    const raw = (zone as { raw?: unknown }).raw;
+    return !!raw && typeof raw === 'object' && !Array.isArray(raw) && 'raw' in raw;
+  });
 }
 
 function storageKey(controllerAddress: string, cameraId: string): string {

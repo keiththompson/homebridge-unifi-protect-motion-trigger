@@ -72,6 +72,60 @@ describe('smart detection snapshot file', () => {
     expect(readFileSync(file, 'utf8')).toContain('"sensitivity":75');
   });
 
+  it('rewrites a nested zone raw once and does not nest it again', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-smart-raw-'));
+    const file = join(dir, SMART_DETECT_SNAPSHOT_FILENAME);
+    const points = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ];
+    const controller = {
+      id: 1,
+      name: 'Gate',
+      color: '#AB46BC',
+      points,
+      sensitivity: 75,
+      objectTypes: ['person'],
+      source: 'unifi-protect',
+    };
+    writeFileSync(
+      file,
+      `${JSON.stringify({
+        version: 1,
+        cameras: [
+          {
+            controllerAddress: '10.0.0.5',
+            cameraId: 'cam1',
+            name: 'Gate Camera',
+            savedAt: '2026-11-10T00:00:00.000Z',
+            config: {
+              ...savedConfig,
+              zones: [
+                {
+                  ...savedConfig.zones[0],
+                  raw: { ...savedConfig.zones[0].raw, raw: controller },
+                },
+              ],
+            },
+          },
+        ],
+      })}\n`,
+    );
+
+    const store = new SmartDetectSnapshotStore(() => dir);
+    expect(store.get('10.0.0.5', 'cam1')?.zones?.[0]?.objectTypes).toEqual(['person']);
+    const healed = JSON.parse(readFileSync(file, 'utf8')) as {
+      cameras: Array<{ config: { zones: Array<{ raw: Record<string, unknown> }> } }>;
+    };
+    expect(healed.cameras[0]?.config.zones[0]?.raw).toEqual(controller);
+    expect(healed.cameras[0]?.config.zones[0]?.raw).not.toHaveProperty('raw');
+
+    store.remember('10.0.0.5', 'cam1', 'Gate Camera', store.get('10.0.0.5', 'cam1'));
+    const again = JSON.parse(readFileSync(file, 'utf8')) as typeof healed;
+    expect(again.cameras[0]?.config.zones[0]?.raw).not.toHaveProperty('raw');
+  });
+
   it('does not replace a saved snapshot when the camera is already off', () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-smart-keep-'));
     const warnings: string[] = [];

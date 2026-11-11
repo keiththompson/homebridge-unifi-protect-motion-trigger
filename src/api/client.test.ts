@@ -499,6 +499,35 @@ function readConfig(camera: CameraStore): ReturnType<typeof readSmartDetectConfi
   return readSmartDetectConfig(camera as unknown as ProtectCamera);
 }
 
+function savedCameraConfig(dir: string): {
+  zones: Array<{ objectTypes: string[]; raw: { objectTypes: string[] } }>;
+  secondLensZones: Array<{ objectTypes: string[]; raw: { objectTypes: string[] } }>;
+} {
+  const saved = JSON.parse(readFileSync(join(dir, SMART_DETECT_SNAPSHOT_FILENAME), 'utf8')) as {
+    cameras: Array<{
+      config: {
+        zones: Array<{ objectTypes: string[]; raw: { objectTypes: string[] } }>;
+        secondLensZones: Array<{ objectTypes: string[]; raw: { objectTypes: string[] } }>;
+      };
+    }>;
+  };
+  const config = saved.cameras[0]?.config;
+  if (!config) {
+    throw new Error('missing snapshot');
+  }
+  return config;
+}
+
+function secondLensTypes(dir: string): string[] {
+  const zone = savedCameraConfig(dir).secondLensZones[0];
+  expect(zone?.raw.objectTypes).toEqual(zone?.objectTypes);
+  return zone?.objectTypes ?? [];
+}
+
+function mainLensTypes(dir: string): string[] {
+  return savedCameraConfig(dir).zones[0]?.objectTypes ?? [];
+}
+
 function zone(name: string, sensitivity: number, objectTypes: string[], points: number[][]): Record<string, unknown> {
   return {
     id: name === 'Street' ? 7 : 3,
@@ -1013,22 +1042,87 @@ describe('smart detection snapshots', () => {
     expect(droppedHealth.controllers[0]?.cameras[0]?.smartDetectEnforcedTypes).toEqual([]);
   });
 
-  it('still rejects a second-lens type the snapshot itself saved', async () => {
+  it('drops a saved second-lens type when a clear puts that list straight back', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-heal-'));
+    const poisoned = readConfig(doorbellRecord(['package']));
+    const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+    snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', poisoned);
     store = doorbellRecord(['package']);
+    const log = createMockLogger();
+    const client = new ProtectClient(log, {
+      sleep: async () => undefined,
+      smartDetectStore: snapshotStore,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
     apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
       applyPatch(store, payload);
       refillEmptySecondLens(store);
       return structuredClone(store);
     });
-    const client = connectedClient();
 
-    const outcome = await client.updateCameraSmartDetection(
-      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
-      false,
-    );
+    const doorbell = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
+    const healed = await client.updateCameraSmartDetection(doorbell, false);
 
-    expect(outcome.smartDetectResult).toBe('mismatch');
+    expect(healed.smartDetectResult).toBe('ok');
+    expect(apiState.retrieve).toHaveBeenCalledTimes(2);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    expect(healed.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(healed.smartDetectConfig?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(healed.smartDetectConfig?.secondLensZones?.[0]?.raw.objectTypes).toEqual([]);
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('removed from the saved snapshot'));
+    expect(secondLensTypes(dir)).toEqual([]);
+
+    const restored = await client.updateCameraSmartDetection(doorbell, true);
+    const downAgain = await client.updateCameraSmartDetection(doorbell, false);
+
+    expect(restored.smartDetectResult).toBe('ok');
+    expect(downAgain.smartDetectResult).toBe('ok');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(secondLensTypes(dir)).toEqual([]);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('keeps an enforced second-lens type out of the snapshot across on and off', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-cycle-'));
+    const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+    snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(doorbellRecord([])));
+    store = doorbellRecord(['package']);
+    const log = createMockLogger();
+    const client = new ProtectClient(log, {
+      sleep: async () => undefined,
+      smartDetectStore: snapshotStore,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      refillEmptySecondLens(store);
+      return structuredClone(store);
+    });
+
+    const doorbell = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
+    const firstOn = await client.updateCameraSmartDetection(doorbell, true);
+    const firstOff = await client.updateCameraSmartDetection(doorbell, false);
+    const secondOn = await client.updateCameraSmartDetection(doorbell, true);
+    const secondOff = await client.updateCameraSmartDetection(doorbell, false);
+
+    expect([firstOn, firstOff, secondOn, secondOff].map((outcome) => outcome.smartDetectResult)).toEqual([
+      'ok',
+      'ok',
+      'ok',
+      'ok',
+    ]);
+    expect(apiState.updateDevice).toHaveBeenCalledTimes(4);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(secondLensTypes(dir)).toEqual([]);
+    expect(mainLensTypes(dir)).toEqual(['person', 'vehicle']);
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('saved snapshot was not changed'));
+    expect(log.info).not.toHaveBeenCalledWith(expect.stringContaining('removed from the saved snapshot'));
   });
 });
 

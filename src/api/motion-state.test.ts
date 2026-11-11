@@ -10,6 +10,8 @@ import {
 import {
   listSmartDetectEnforcedTypes,
   planSmartDetectWrite,
+  refilledAfterClear,
+  sanitizeSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectObligationMet,
   type SmartDetectZoneSnapshot,
@@ -277,6 +279,17 @@ describe('motion state', () => {
     expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], ['package']), saved)).toBe(false);
     expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], []), saved)).toBe(false);
 
+    const whileOn = planSmartDetectWrite(
+      false,
+      cameraFromConfig('Entrance Doorbell', dualLensConfig(['person', 'vehicle'], ['package'])),
+      saved,
+    );
+    expect(whileOn.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(whileOn.config?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(whileOn.config?.secondLensZones?.[0]?.raw.objectTypes).toEqual([]);
+    expect(whileOn.patch.smartDetectZones?.[0]).toMatchObject({ objectTypes: [] });
+    expect(whileOn.patch.secondLensSmartDetectZones?.[0]).toMatchObject({ objectTypes: [] });
+
     const again = planSmartDetectWrite(false, cameraFromConfig('Entrance Doorbell', cleared), saved);
     expect(again.patch).toEqual({});
     expect(again.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
@@ -296,6 +309,79 @@ describe('motion state', () => {
     expect(smartDetectDrift(true, added, saved)).toBe(true);
     expect(smartDetectObligationMet(false, saved, stillOn)).toBe(false);
     expect(smartDetectObligationMet(true, saved, added)).toBe(false);
+  });
+
+  it('treats a fully refilled list as enforced only when another saved list did clear', () => {
+    const poisoned = dualLensConfig(['person', 'vehicle'], ['package']);
+    const refilled = dualLensConfig([], ['package']);
+    const untouched = dualLensConfig(['person', 'vehicle'], ['package']);
+    const partial = dualLensConfig(['person'], ['package']);
+
+    expect(refilledAfterClear(poisoned, refilled)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+    expect(refilledAfterClear(poisoned, untouched)).toBeNull();
+    expect(refilledAfterClear(poisoned, partial)).toBeNull();
+    expect(refilledAfterClear(dualLensConfig(['person', 'vehicle'], []), refilled)).toBeNull();
+
+    const zoneStayed = dualLensConfig(['person', 'vehicle'], []);
+    zoneStayed.objectTypes = ['person', 'vehicle'];
+    zoneStayed.zones = zoneStayed.zones?.slice(0, 1) ?? null;
+    zoneStayed.secondLensZones = null;
+    const settingsCleared = {
+      ...zoneStayed,
+      objectTypes: [] as string[],
+      zones: zoneStayed.zones?.map((zone) => ({ ...zone, objectTypes: ['person', 'vehicle'] })) ?? null,
+    };
+    expect(refilledAfterClear(zoneStayed, settingsCleared)).toBeNull();
+  });
+
+  it('unwraps a zone raw that was nested by an earlier snapshot', () => {
+    const points = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ];
+    const controller = {
+      id: 1,
+      name: 'Default',
+      color: '#AB46BC',
+      points,
+      sensitivity: 50,
+      objectTypes: ['person', 'vehicle'],
+      source: 'unifi-protect',
+    };
+    const wrapped = {
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Default',
+          points,
+          sensitivity: 50,
+          objectTypes: ['person', 'vehicle'],
+          raw: {
+            id: 1,
+            name: 'Default',
+            points,
+            sensitivity: 50,
+            objectTypes: ['person', 'vehicle'],
+            raw: controller,
+          },
+        },
+      ],
+      secondLensZones: null,
+    };
+
+    const once = sanitizeSmartDetectConfig(wrapped);
+    const twice = sanitizeSmartDetectConfig(once);
+    expect(once?.zones?.[0]?.raw).toEqual(controller);
+    expect(once?.zones?.[0]?.raw).not.toHaveProperty('raw');
+    expect(twice?.zones?.[0]?.raw).toEqual(controller);
+    expect(JSON.stringify(twice?.zones?.[0]?.raw)).not.toContain('"raw"');
   });
 
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {
