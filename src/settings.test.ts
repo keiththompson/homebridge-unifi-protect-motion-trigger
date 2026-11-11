@@ -28,7 +28,7 @@ describe('settings', () => {
   it('matches package.json so health reports the published version', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
     expect(PLUGIN_VERSION).toBe(pkg.version);
-    expect(PLUGIN_VERSION).toBe('1.0.13');
+    expect(PLUGIN_VERSION).toBe('1.0.14');
   });
 
   it('names the health file home-monitor reads and refreshes inside its stale window', () => {

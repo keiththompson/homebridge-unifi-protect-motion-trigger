@@ -138,7 +138,7 @@ describe('ProtectMotionPlatform health', () => {
     expect(text).not.toContain('homebridge-user');
     expect(text).toContain('10.0.0.5');
     expect(health.schemaVersion).toBe('1.2.0');
-    expect(health.pluginVersion).toBe('1.0.13');
+    expect(health.pluginVersion).toBe('1.0.14');
     expect(health.controllers[0]?.cameras[0]).toMatchObject({
       id: 'cam1',
       createMotionEvents: true,
@@ -334,7 +334,7 @@ describe('ProtectMotionPlatform health file', () => {
         cameraHealth: Array<{ readback: { status: string }; drift: boolean | null }>;
       }>;
     };
-    expect(parsed.pluginVersion).toBe('1.0.13');
+    expect(parsed.pluginVersion).toBe('1.0.14');
     expect(parsed.schemaVersion).toBe('1.2.0');
     expect(typeof parsed.updatedAtEpoch).toBe('number');
     expect(parsed.controllers[0]?.connected).toBe(true);
