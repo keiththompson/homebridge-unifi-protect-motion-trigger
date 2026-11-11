@@ -356,8 +356,8 @@ export class CameraAccessory {
         break;
       default:
         this.platform.log.warn(
-          `Unable to update ${setting} for ${this.camera.name}. The Protect API may be unreachable. ` +
-            `If this persists, restart Homebridge.`,
+          `Unable to update ${setting} for ${this.camera.name}. The Protect controller did not confirm the change. ` +
+            `The plugin will keep trying to restore the session.`,
         );
     }
   }

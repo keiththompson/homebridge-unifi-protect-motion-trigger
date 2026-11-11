@@ -1,7 +1,12 @@
 import type { Logging } from 'homebridge';
 import { ProtectApi } from 'unifi-protect';
 
-import { type CameraReadbackSnapshot, errorSnapshot, snapshotFromCamera } from '../health.js';
+import {
+  type CameraReadbackSnapshot,
+  errorSnapshot,
+  HEALTH_SESSION_LOST_ERROR,
+  snapshotFromCamera,
+} from '../health.js';
 import type { SmartDetectSnapshotStore } from '../smart-detect-store.js';
 import { ProtectApiError } from './errors.js';
 import {
@@ -32,6 +37,22 @@ import type {
 } from './types.js';
 
 export type MessageHandler = (packet: ProtectEventPacket) => void;
+
+/** How often a live client checks for a dropped bootstrap or events websocket. */
+export const SESSION_WATCHDOG_BASE_MS = 3 * 60 * 1000;
+
+/** Longest delay between session recovery attempts after repeated failures. */
+export const SESSION_WATCHDOG_MAX_MS = 15 * 60 * 1000;
+
+/** Skip another bootstrap refresh immediately after one just failed. */
+const RECOVERY_FAILURE_FLOOR_MS = 5_000;
+
+/** WebSocket.OPEN. The unifi-protect events socket is private and only present while connected. */
+const WEBSOCKET_OPEN = 1;
+
+interface SessionRecoveryBudget {
+  remaining: number;
+}
 
 interface ProtectResponse {
   statusCode?: number;
@@ -76,8 +97,20 @@ export class ProtectClient {
 
   // Serializes device writes so a burst (e.g. a HomeKit scene toggling every
   // camera at once) never fans out into dozens of concurrent API calls, which
-  // would trip the controller's error throttling.
+  // would trip the controller's error throttling. The first write in the burst
+  // refreshes a lost session; the rest then use that restored login.
   private writeQueue: Promise<unknown> = Promise.resolve();
+
+  /** One shared refresh so overlapping reads, writes, and the watchdog log in once. */
+  private recoveryInFlight: Promise<boolean> | null = null;
+  private recoveryFailures = 0;
+  private lastRecoveryAttemptAt: number | null = null;
+  private lastRecoverySucceeded = false;
+  private sessionRecoveredAt: number | null = null;
+  /** True after the current bootstrap has been checked for admin rights. */
+  private adminConfirmed = false;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogDelayMs: number = SESSION_WATCHDOG_BASE_MS;
 
   constructor(
     private readonly log: Logging,
@@ -128,6 +161,10 @@ export class ProtectClient {
       }
 
       this.connected = true;
+      this.adminConfirmed = true;
+      this.recoveryFailures = 0;
+      this.lastRecoverySucceeded = true;
+      this.startWatchdog();
 
       if (!this.api.isAdminUser) {
         this.log.warn(
@@ -169,6 +206,34 @@ export class ProtectClient {
 
   public get isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * True when the controller bootstrap and realtime events websocket are both up.
+   * A logged-in non-admin still counts: logout clears the bootstrap and the socket.
+   */
+  public get hasLiveSession(): boolean {
+    return this.connected && this.hasBootstrap() && this.eventsWebsocketOpen();
+  }
+
+  /** True after a successful login whose bootstrap or events websocket later disappeared. */
+  public get isReconnecting(): boolean {
+    return this.connected && !this.hasLiveSession;
+  }
+
+  /** Fixed health phrase, or null while the session is up or login never succeeded. */
+  public get sessionLossError(): string | null {
+    return this.isReconnecting ? HEALTH_SESSION_LOST_ERROR : null;
+  }
+
+  /** Failed bootstrap refreshes since the last successful one. */
+  public get consecutiveRecoveryFailures(): number {
+    return this.recoveryFailures;
+  }
+
+  /** Timestamp of the last successful session refresh, excluding the initial connect. */
+  public get lastSessionRecoveryAt(): number | null {
+    return this.sessionRecoveredAt;
   }
 
   public getCameraSnapshot(cameraId: string): CameraReadbackSnapshot | null {
@@ -236,9 +301,11 @@ export class ProtectClient {
   /**
    * Applies a settings payload to a camera, serialized behind {@link writeQueue}.
    *
-   * Short-circuits (without hitting the network) when disconnected, when the API is
-   * already throttling, or when the account lacks admin rights — so a burst of writes
-   * against a throttled/unauthorized controller no longer piles up more failing calls.
+   * Short-circuits (without hitting the network) when disconnected or when the API is
+   * already throttling, so a burst of writes against a throttled controller no longer
+   * piles up more failing calls. A missing bootstrap or a logout (admin cleared) is
+   * refreshed once before the write; a non-admin result is reported only after that
+   * fresh bootstrap still lacks admin rights.
    */
   private updateDevice(camera: ProtectCamera, settings: CameraSettingsUpdate): Promise<UpdateOutcome> {
     const run = this.writeQueue.then(() => this.performUpdate(camera, settings));
@@ -289,8 +356,13 @@ export class ProtectClient {
     if (this.api.isThrottled) {
       return finish('throttled');
     }
-    if (!this.api.isAdminUser) {
+    const session = await this.ensureWritableSession();
+    if (session === 'unauthorized') {
       return finish('unauthorized');
+    }
+    if (session !== 'ok') {
+      this.log.error(`Cannot update ${camera.name}: the UniFi Protect session is unavailable. Recovery will continue.`);
+      return finish('failed');
     }
 
     let liveCamera: ProtectCamera | null = null;
@@ -497,6 +569,27 @@ export class ProtectClient {
     camera: ProtectCamera,
     payload: CameraWritePayload,
   ): Promise<{ ok: true } | { ok: false; result: UpdateResult; error: string }> {
+    const first = await this.writeDeviceOnce(camera, payload);
+    // A rejected PATCH is retried only after the library has logged itself out.
+    // The payload sets fixed values, so one retry cannot apply a second change.
+    if (first.ok || !this.sessionLost()) {
+      return first;
+    }
+    const restored = await this.recoverSession();
+    if (restored && this.hasBootstrap() && !this.api.isAdminUser) {
+      return { ok: false, result: 'unauthorized', error: 'account is not a Protect admin' };
+    }
+    if (!restored || !this.api.isAdminUser) {
+      return { ok: false, result: 'failed', error: first.error };
+    }
+    this.log.warn(`Retrying the update for ${camera.name} after refreshing the UniFi Protect session.`);
+    return this.writeDeviceOnce(camera, payload);
+  }
+
+  private async writeDeviceOnce(
+    camera: ProtectCamera,
+    payload: CameraWritePayload,
+  ): Promise<{ ok: true } | { ok: false; result: UpdateResult; error: string }> {
     try {
       const result = await this.api.updateDevice(camera as never, payload as never);
       if (!result) {
@@ -513,9 +606,11 @@ export class ProtectClient {
   }
 
   public disconnect(): void {
+    this.stopWatchdog();
     if (this.connected) {
       this.api.reset();
       this.connected = false;
+      this.adminConfirmed = false;
       this.messageHandlers = [];
     }
   }
@@ -526,6 +621,7 @@ export class ProtectClient {
   ): Promise<{ matched: boolean; camera: ProtectCamera | null; attempts: number; error: string | null }> {
     let lastCamera: ProtectCamera | null = null;
     let error: string | null = null;
+    const budget: SessionRecoveryBudget = { remaining: 1 };
 
     for (let index = 0; index < MOTION_READBACK_DELAYS_MS.length; index += 1) {
       const delay = MOTION_READBACK_DELAYS_MS[index] ?? 0;
@@ -533,7 +629,7 @@ export class ProtectClient {
         await this.sleep(delay);
       }
       try {
-        const record = await this.fetchCameraRecord(camera);
+        const record = await this.fetchCameraRecord(camera, budget);
         if (record) {
           lastCamera = record;
           error = null;
@@ -556,7 +652,32 @@ export class ProtectClient {
     };
   }
 
-  private async fetchCameraRecord(camera: ProtectCamera): Promise<ProtectCamera | null> {
+  private async fetchCameraRecord(
+    camera: ProtectCamera,
+    budget: SessionRecoveryBudget = { remaining: 1 },
+  ): Promise<ProtectCamera | null> {
+    if (this.connected && !this.hasBootstrap() && budget.remaining > 0) {
+      budget.remaining -= 1;
+      await this.recoverSession();
+    }
+    const record = await this.retrieveCameraRecord(camera);
+    if (record) {
+      return record;
+    }
+    // A 401 clears the bootstrap inside the library before this null comes back.
+    if (this.connected && !this.hasBootstrap() && budget.remaining > 0 && !this.api.isThrottled) {
+      budget.remaining -= 1;
+      const restored = await this.recoverSession();
+      if (!restored) {
+        return null;
+      }
+      this.log.warn(`Retrying the camera read for ${camera.name} after refreshing the UniFi Protect session.`);
+      return this.retrieveCameraRecord(camera);
+    }
+    return null;
+  }
+
+  private async retrieveCameraRecord(camera: ProtectCamera): Promise<ProtectCamera | null> {
     const endpoint = this.api.getApiEndpoint('camera');
     const response = await this.api.retrieve(`${endpoint}/${encodeURIComponent(camera.id)}`, { method: 'GET' });
     if (!response) {
@@ -593,6 +714,171 @@ export class ProtectClient {
         this.log.warn(`Could not read ${camera.name} before changing motion detection (${errorText(error)}).`);
       }
       return null;
+    }
+  }
+
+  /**
+   * Logout clears the bootstrap and admin flag together. A non-admin account keeps
+   * its bootstrap, so a missing bootstrap is the lost-session signal.
+   */
+  private sessionLost(): boolean {
+    if (this.api.isThrottled) {
+      return false;
+    }
+    return !this.hasBootstrap() || !this.api.isAdminUser;
+  }
+
+  private hasBootstrap(): boolean {
+    return Boolean(this.api.bootstrap);
+  }
+
+  /**
+   * unifi-protect keeps the events socket on a private `_eventsWs` field and sets it
+   * to null on logout or when the socket closes. Test doubles that omit the field are
+   * treated as open so they are not refreshed on every check.
+   */
+  private eventsWebsocketOpen(): boolean {
+    const api: object = this.api;
+    if (!Object.prototype.hasOwnProperty.call(api, '_eventsWs')) {
+      return true;
+    }
+    const socket = (api as { _eventsWs?: unknown })._eventsWs;
+    if (!socket || typeof socket !== 'object') {
+      return false;
+    }
+    if ('readyState' in socket && typeof socket.readyState === 'number') {
+      return socket.readyState === WEBSOCKET_OPEN;
+    }
+    return true;
+  }
+
+  /**
+   * Refreshes a logged-out session before a write. `unauthorized` is returned only
+   * when the new bootstrap still says this account cannot change devices.
+   */
+  private async ensureWritableSession(): Promise<'ok' | 'unauthorized' | 'failed'> {
+    const loggedOut = !this.hasBootstrap();
+    if (!loggedOut && this.api.isAdminUser) {
+      return 'ok';
+    }
+    // The current bootstrap already said this account cannot change devices.
+    if (!loggedOut && this.adminConfirmed && !this.api.isAdminUser) {
+      return 'unauthorized';
+    }
+    const restored = await this.recoverSession();
+    if (restored && this.hasBootstrap() && !this.api.isAdminUser) {
+      return 'unauthorized';
+    }
+    if (!restored || !this.hasBootstrap() || !this.api.isAdminUser) {
+      return 'failed';
+    }
+    return 'ok';
+  }
+
+  private recoverSession(): Promise<boolean> {
+    if (this.recoveryInFlight) {
+      return this.recoveryInFlight;
+    }
+    if (!this.connected) {
+      return Promise.resolve(false);
+    }
+    if (
+      !this.lastRecoverySucceeded &&
+      this.lastRecoveryAttemptAt !== null &&
+      this.now() - this.lastRecoveryAttemptAt < RECOVERY_FAILURE_FLOOR_MS
+    ) {
+      return Promise.resolve(false);
+    }
+    this.recoveryInFlight = this.recoverSessionOnce().finally(() => {
+      this.recoveryInFlight = null;
+    });
+    return this.recoveryInFlight;
+  }
+
+  /**
+   * `getBootstrap` logs in again with the credentials stored by the library,
+   * reloads the bootstrap, re-checks admin, and reopens the events websocket.
+   */
+  private async recoverSessionOnce(): Promise<boolean> {
+    this.lastRecoveryAttemptAt = this.now();
+    this.log.warn('UniFi Protect session is unavailable. Refreshing the controller bootstrap.');
+    let restored = false;
+    try {
+      const ok = await this.api.getBootstrap();
+      if (!this.connected) {
+        return false;
+      }
+      restored = Boolean(ok && this.api.bootstrap);
+    } catch (error) {
+      this.log.error(`Unable to refresh the UniFi Protect bootstrap: ${errorText(error)}`);
+      restored = false;
+    }
+    this.lastRecoverySucceeded = restored;
+    if (restored) {
+      this.recoveryFailures = 0;
+      this.adminConfirmed = true;
+      this.sessionRecoveredAt = this.now();
+      this.watchdogDelayMs = SESSION_WATCHDOG_BASE_MS;
+      if (this.watchdogTimer) {
+        this.scheduleWatchdog();
+      }
+      this.log.info('UniFi Protect session restored.');
+    } else {
+      this.recoveryFailures += 1;
+      this.adminConfirmed = false;
+      this.log.warn('UniFi Protect session could not be restored. Another attempt will follow.');
+    }
+    this.emitHealthChange();
+    return restored;
+  }
+
+  private startWatchdog(): void {
+    this.watchdogDelayMs = SESSION_WATCHDOG_BASE_MS;
+    this.scheduleWatchdog();
+  }
+
+  private scheduleWatchdog(): void {
+    this.clearWatchdogTimer();
+    const timer = setTimeout(() => {
+      void this.onWatchdog();
+    }, this.watchdogDelayMs);
+    timer.unref?.();
+    this.watchdogTimer = timer;
+  }
+
+  private clearWatchdogTimer(): void {
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private stopWatchdog(): void {
+    this.clearWatchdogTimer();
+  }
+
+  /** Recovers a missing bootstrap or events websocket so motion events resume without a write. */
+  private async onWatchdog(): Promise<void> {
+    this.watchdogTimer = null;
+    if (!this.connected) {
+      return;
+    }
+    try {
+      if (!this.hasBootstrap() || !this.eventsWebsocketOpen()) {
+        const restored = await this.recoverSession();
+        this.watchdogDelayMs =
+          restored && this.hasLiveSession
+            ? SESSION_WATCHDOG_BASE_MS
+            : Math.min(this.watchdogDelayMs * 2, SESSION_WATCHDOG_MAX_MS);
+      } else {
+        this.watchdogDelayMs = SESSION_WATCHDOG_BASE_MS;
+      }
+    } catch (error) {
+      this.watchdogDelayMs = Math.min(this.watchdogDelayMs * 2, SESSION_WATCHDOG_MAX_MS);
+      this.log.error(`Protect session watchdog failed: ${errorText(error)}`);
+    }
+    if (this.connected) {
+      this.scheduleWatchdog();
     }
   }
 

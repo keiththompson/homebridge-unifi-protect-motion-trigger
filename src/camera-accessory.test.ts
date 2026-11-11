@@ -89,6 +89,41 @@ describe('CameraAccessory motion lifecycle', () => {
     expect(accessory.context.motionEnabled).toBe(false);
   });
 
+  it('tells a confirmed non-admin apart from a lost session', async () => {
+    vi.useFakeTimers();
+    const accessory = createMockAccessory('Front Door', 'uuid-1');
+    accessory.context.camera = camera(true);
+    const log = createMockLogger();
+    const client = {
+      updateCameraSettings: vi.fn().mockResolvedValue(outcome('unauthorized')),
+    } as unknown as ProtectClient;
+    new CameraAccessory(platform(log), accessory, client, 10);
+
+    const pending = motionSwitch(accessory).invokeSet(false);
+    await vi.advanceTimersByTimeAsync(50);
+    await pending;
+
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('not a Protect admin'));
+  });
+
+  it('does not describe a lost session as a missing admin role', async () => {
+    vi.useFakeTimers();
+    const accessory = createMockAccessory('Front Door', 'uuid-1');
+    accessory.context.camera = camera(true);
+    const log = createMockLogger();
+    const client = {
+      updateCameraSettings: vi.fn().mockResolvedValue(outcome('failed')),
+    } as unknown as ProtectClient;
+    new CameraAccessory(platform(log), accessory, client, 10);
+
+    const pending = motionSwitch(accessory).invokeSet(false);
+    await vi.advanceTimersByTimeAsync(50);
+    await pending;
+
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('restore the session'));
+    expect(log.warn).not.toHaveBeenCalledWith(expect.stringContaining('not a Protect admin'));
+  });
+
   it('does not keep a motion change that readback rejected', async () => {
     vi.useFakeTimers();
     const accessory = createMockAccessory('Front Door', 'uuid-1');

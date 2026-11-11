@@ -75,8 +75,8 @@ export interface LedSettings {
  * - `ok`: an independent camera read showed the requested effective state.
  * - `mismatch`: the PATCH returned a device, but the following read did not match.
  * - `throttled`: the Protect API is pausing calls after repeated errors; the write was not attempted.
- * - `unauthorized`: the configured account lacks admin privileges required to change device settings.
- * - `failed`: the write was rejected, the client is not connected, or the camera could not be read back.
+ * - `unauthorized`: a fresh bootstrap confirmed the account cannot change device settings.
+ * - `failed`: the write was rejected, the client is not connected, the session could not be restored, or the camera could not be read back.
  */
 export type UpdateResult = 'ok' | 'mismatch' | 'throttled' | 'unauthorized' | 'failed';
 

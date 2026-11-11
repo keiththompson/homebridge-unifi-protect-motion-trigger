@@ -6,7 +6,7 @@ import { smartDetectConfigActive } from './api/smart-detect.js';
 import type { ProtectCamera, ProtectEventPacket } from './api/types.js';
 import { CameraAccessory } from './camera-accessory.js';
 import type { HealthControllerInput, PluginHealth } from './health.js';
-import { buildHealthReport, toPersistedHealth, writeHealthFileAtomic } from './health.js';
+import { buildHealthReport, HEALTH_SESSION_LOST_ERROR, toPersistedHealth, writeHealthFileAtomic } from './health.js';
 import type { ControllerConfig, ProtectMotionPlatformConfig } from './settings.js';
 import {
   DEFAULT_MOTION_DURATION,
@@ -88,11 +88,11 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
   public async getHealth(options?: { refresh?: boolean; now?: number }): Promise<PluginHealth> {
     const now = options?.now ?? Date.now();
     if (options?.refresh) {
-      for (const session of this.sessions.values()) {
+      for (const [address, session] of this.sessions) {
         if (!session.connected) {
           continue;
         }
-        for (const camera of session.client.cameras) {
+        for (const camera of this.refreshTargets(address, session.client)) {
           await session.client.refreshCamera(camera);
         }
       }
@@ -100,13 +100,15 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
 
     const controllers: HealthControllerInput[] = [];
     for (const [address, session] of this.sessions) {
+      this.syncSessionHealth(session);
+      const live = session.connected && session.client.hasLiveSession;
       controllers.push({
         address,
-        connected: session.connected,
+        connected: live,
         throttled: session.connected ? session.client.isThrottled : false,
-        admin: session.connected ? session.client.isAdminUser : null,
+        admin: live ? session.client.isAdminUser : null,
         lastError: session.lastError,
-        cameras: session.connected ? this.healthCameras(address, session.client) : [],
+        cameras: this.healthCameras(address, session.client),
       });
     }
 
@@ -244,20 +246,91 @@ export class ProtectMotionPlatform implements DynamicPlatformPlugin {
     return this.smartDetectStore.get(address, cameraId) ?? accessory?.savedSmartDetectConfig ?? null;
   }
 
+  /**
+   * A lost session clears the live bootstrap, which used to report zero cameras.
+   * Configured accessories keep the camera list and the last readback.
+   */
   private healthCameras(address: string, client: ProtectClient): HealthControllerInput['cameras'] {
-    return client.cameras.map((camera) => {
-      const accessory = this.configuredAccessories.get(camera.id);
-      const smartDetectSnapshot = this.smartDetectSnapshot(address, camera.id, accessory);
+    const known: Array<{ id: string; name: string }> = [];
+    const seen = new Set<string>();
+    const push = (id: string, name: string): void => {
+      if (!id || seen.has(id)) {
+        return;
+      }
+      seen.add(id);
+      known.push({ id, name });
+    };
+    for (const camera of client.cameras) {
+      push(camera.id, camera.name);
+    }
+    for (const accessory of this.accessories) {
+      if (accessory.context.controllerAddress !== address) {
+        continue;
+      }
+      const camera = accessory.context.camera as Partial<ProtectCamera> | undefined;
+      if (!camera?.id) {
+        continue;
+      }
+      push(camera.id, camera.name || accessory.displayName);
+    }
+    return known.map(({ id, name }) => {
+      const accessory = this.configuredAccessories.get(id);
+      const smartDetectSnapshot = this.smartDetectSnapshot(address, id, accessory);
       return {
-        id: camera.id,
-        name: camera.name,
+        id,
+        name,
         intendedMotionEnabled: accessory ? accessory.motionEnabledState : null,
         smartDetectPreferencesSaved: smartDetectConfigActive(smartDetectSnapshot),
         intendedSmartDetect: accessory ? accessory.smartDetectState : null,
         smartDetectSnapshot,
-        snapshot: client.getCameraSnapshot(camera.id),
+        snapshot: client.getCameraSnapshot(id),
       };
     });
+  }
+
+  private refreshTargets(address: string, client: ProtectClient): ProtectCamera[] {
+    if (client.cameras.length > 0) {
+      return client.cameras;
+    }
+    const cameras: ProtectCamera[] = [];
+    for (const accessory of this.accessories) {
+      if (accessory.context.controllerAddress !== address) {
+        continue;
+      }
+      const camera = accessory.context.camera as ProtectCamera | undefined;
+      if (camera?.id) {
+        cameras.push(camera);
+      }
+    }
+    return cameras;
+  }
+
+  /** Reflects a dropped bootstrap or events websocket without counting it on every read. */
+  private syncSessionHealth(session: ControllerSession): void {
+    if (!session.connected) {
+      return;
+    }
+    const live = session.client.hasLiveSession;
+    const recoveredAt = session.client.lastSessionRecoveryAt;
+    if (recoveredAt !== null && (session.lastBootstrapAt === null || recoveredAt > session.lastBootstrapAt)) {
+      session.lastBootstrapAt = recoveredAt;
+    }
+    if (!live) {
+      if (session.lastError !== HEALTH_SESSION_LOST_ERROR) {
+        session.consecutiveFailures += 1;
+      }
+      session.lastError = HEALTH_SESSION_LOST_ERROR;
+      session.reconnecting = true;
+      if (session.client.consecutiveRecoveryFailures > session.consecutiveFailures) {
+        session.consecutiveFailures = session.client.consecutiveRecoveryFailures;
+      }
+      return;
+    }
+    if (session.reconnecting || session.lastError === HEALTH_SESSION_LOST_ERROR) {
+      session.lastError = null;
+      session.reconnecting = false;
+      session.consecutiveFailures = 0;
+    }
   }
 
   private configureCameras(client: ProtectClient, cameras: ProtectCamera[], controllerAddress: string): void {
