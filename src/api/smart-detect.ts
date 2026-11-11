@@ -11,10 +11,9 @@ const LIST_KEYS = ['objectTypes', 'audioTypes', 'autoTrackingObjectTypes'] as co
  *
  * A controller may put types back on a list this plugin saved as empty
  * (a second-lens zone is one case). Those types are not part of the snapshot.
- * A later off copies the live camera again, but it does not copy types on a
- * list the previous snapshot left empty. If a snapshot already absorbed such
- * a type, and a clear puts that list straight back while other saved types
- * do clear, the type is dropped from the snapshot.
+ * A later off copies the live camera again. Types are left out only after a
+ * second clear of that same list comes back unchanged. Those recorded types
+ * are the ones Protect enforces. A type the user turned on is kept.
  * Off still succeeds when every saved type is gone. On still succeeds when
  * every saved type is back. The extra types are reported, not stored.
  */
@@ -145,18 +144,19 @@ export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig
  * An active camera read replaces the saved snapshot. A disabled read does not.
  * A live camera whose saved types are already gone, and whose only remaining
  * types sit on lists the snapshot left empty, does not replace the snapshot.
- * When the live camera is still on, types on a list the previous snapshot
- * left empty are left out of the new snapshot.
+ * Recorded enforced types are left out of a new snapshot. Other types on a
+ * list the previous snapshot left empty are kept: the user may have enabled them.
  * Settings lists that were already cleared (1.0.11 only cleared those) are kept
  * from the saved snapshot when the live zones are still the user's zones.
  */
 export function retainSmartDetectSnapshot(
   saved: SmartDetectConfig | null,
   live: SmartDetectConfig | null,
+  enforced: SmartDetectEnforcedType[] = [],
 ): SmartDetectConfig | null {
   if (live && smartDetectConfigActive(live)) {
     if (saved && smartDetectConfigActive(saved) && liveHasOnlyUnsavedTypes(saved, live)) {
-      return cloneSmartDetectConfig(saved);
+      return withoutKnownEnforced(cloneSmartDetectConfig(saved), enforced);
     }
     const chosen = cloneSmartDetectConfig(live);
     if (saved && smartDetectConfigActive(saved)) {
@@ -172,13 +172,12 @@ export function retainSmartDetectSnapshot(
       if (chosen.secondLensZones === null && saved.secondLensZones) {
         chosen.secondLensZones = cloneZones(saved.secondLensZones);
       }
-      return omitTypesSavedAsEmpty(chosen, saved);
     }
-    return chosen;
+    return withoutKnownEnforced(chosen, enforced);
   }
 
   if (saved && smartDetectConfigActive(saved)) {
-    return cloneSmartDetectConfig(saved);
+    return withoutKnownEnforced(cloneSmartDetectConfig(saved), enforced);
   }
 
   return null;
@@ -262,60 +261,95 @@ export function smartDetectEffectivelyEnabled(
 }
 
 /**
- * Drops types `actual` has that `baseline` does not, so a confirmed readback
- * cannot fold controller-added types into the snapshot.
- */
-/**
- * Owned types that came back in full on a list we cleared, while some other
- * saved type did clear. A zone counts only when another zone cleared; a
- * settings list clearing while its zone stays on is not this case. Null when
- * the clear did not apply, or a list was only partly cleared. The caller drops
- * the returned types from the snapshot.
+ * One readback is not evidence that Protect forced a type. A zone that did not
+ * clear can be a write that did not apply. Callers confirm with a second clear
+ * of that list and {@link confirmedEnforcedTypes}.
  */
 export function refilledAfterClear(
-  baseline: SmartDetectConfig,
-  actual: SmartDetectConfig,
+  _baseline: SmartDetectConfig,
+  _actual: SmartDetectConfig,
 ): SmartDetectEnforcedType[] | null {
-  if (!structuresAlign(baseline, actual)) {
-    return null;
+  return null;
+}
+
+/**
+ * Types that were still present after the clear and are still present, with the
+ * same values, after clearing that list again.
+ */
+export function confirmedEnforcedTypes(
+  written: SmartDetectConfig,
+  before: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  const beforeExtras = listSmartDetectEnforcedTypes(written, before);
+  const afterExtras = listSmartDetectEnforcedTypes(written, after);
+  const confirmed: SmartDetectEnforcedType[] = [];
+  for (const entry of beforeExtras) {
+    const later = afterExtras.find((candidate) => sameEnforcedPlace(entry, candidate));
+    if (!later) {
+      continue;
+    }
+    const stayed = entry.types.filter((type) => later.types.includes(type));
+    if (stayed.length === 0) {
+      continue;
+    }
+    confirmed.push({ ...entry, types: [...stayed].sort() });
   }
-  const refilled: SmartDetectEnforcedType[] = [];
-  let clearedSomething = false;
-  let partial = false;
-  if (baseline.settingsPresent) {
-    for (const key of LIST_KEYS) {
-      const outcome = classifyClear(baseline[key], actual[key]);
-      if (outcome === 'cleared') {
-        clearedSomething = true;
-      } else if (outcome === 'partial') {
-        partial = true;
-      } else if (outcome === 'refilled') {
-        refilled.push({ list: key, zoneId: null, zoneName: null, types: [...baseline[key]].sort() });
-      }
+  return confirmed;
+}
+
+/** Residuals that are not already recorded as enforced. */
+export function novelResidualTypes(
+  residuals: SmartDetectEnforcedType[],
+  known: SmartDetectEnforcedType[],
+): SmartDetectEnforcedType[] {
+  const novel: SmartDetectEnforcedType[] = [];
+  for (const entry of residuals) {
+    const recorded = known.find((item) => sameEnforcedPlace(item, entry));
+    const knownTypes = new Set(recorded?.types ?? []);
+    const types = entry.types.filter((type) => !knownTypes.has(type));
+    if (types.length > 0) {
+      novel.push({ ...entry, types });
     }
   }
-  const zoneRefill = collectZoneRefill(baseline.zones, actual.zones, 'zone');
-  const secondRefill = collectZoneRefill(baseline.secondLensZones, actual.secondLensZones, 'secondLensZone');
-  if (!zoneRefill || !secondRefill) {
-    return null;
+  return novel;
+}
+
+/** The original clear, limited to the lists that still have types. */
+export function patchForResidualLists(full: SmartDetectPatch, residuals: SmartDetectEnforcedType[]): SmartDetectPatch {
+  const lists = new Set(residuals.map((entry) => entry.list));
+  const next: SmartDetectPatch = {};
+  if (
+    full.smartDetectSettings &&
+    (lists.has('objectTypes') || lists.has('audioTypes') || lists.has('autoTrackingObjectTypes'))
+  ) {
+    next.smartDetectSettings = {
+      objectTypes: [...full.smartDetectSettings.objectTypes],
+      audioTypes: [...full.smartDetectSettings.audioTypes],
+      autoTrackingObjectTypes: [...full.smartDetectSettings.autoTrackingObjectTypes],
+    };
   }
-  clearedSomething = clearedSomething || zoneRefill.clearedSomething || secondRefill.clearedSomething;
-  partial = partial || zoneRefill.partial || secondRefill.partial;
-  const zoneRefilled = [...zoneRefill.refilled, ...secondRefill.refilled];
-  const zoneCleared = zoneRefill.clearedSomething || secondRefill.clearedSomething;
-  // A settings list clearing while the zone stays on is the old failure mode:
-  // the zone was not refilled, the zone write did not apply. A refilled zone
-  // counts only when some other zone did clear.
-  if (partial || zoneRefilled.length + refilled.length === 0) {
-    return null;
+  if (full.smartDetectZones && lists.has('zone')) {
+    next.smartDetectZones = full.smartDetectZones.map((zone) => structuredClone(zone));
   }
-  if (zoneRefilled.length > 0 && !zoneCleared) {
-    return null;
+  if (full.secondLensSmartDetectZones && lists.has('secondLensZone')) {
+    next.secondLensSmartDetectZones = full.secondLensSmartDetectZones.map((zone) => structuredClone(zone));
   }
-  if (zoneRefilled.length === 0 && !clearedSomething) {
-    return null;
+  return next;
+}
+
+function sameEnforcedPlace(left: SmartDetectEnforcedType, right: SmartDetectEnforcedType): boolean {
+  return left.list === right.list && left.zoneId === right.zoneId && left.zoneName === right.zoneName;
+}
+
+function withoutKnownEnforced(
+  config: SmartDetectConfig | null,
+  enforced: SmartDetectEnforcedType[],
+): SmartDetectConfig | null {
+  if (!config || enforced.length === 0) {
+    return config;
   }
-  return [...refilled, ...zoneRefilled];
+  return withoutRefilledTypes(config, enforced);
 }
 
 /** Snapshot with the refilled types removed, so the next off does not try to clear them. */
@@ -416,11 +450,12 @@ export function planSmartDetectWrite(
   enabled: boolean,
   camera: ProtectCamera | null,
   saved: SmartDetectConfig | null,
+  enforced: SmartDetectEnforcedType[] = [],
 ): SmartDetectWritePlan {
   const live = camera ? readSmartDetectConfig(camera) : null;
 
   if (!enabled) {
-    const snapshot = retainSmartDetectSnapshot(saved, live);
+    const snapshot = retainSmartDetectSnapshot(saved, live, enforced);
     if (!live || !hasSmartDetectRecord(live)) {
       return { patch: {}, config: snapshot, expectedConfig: null, nothingToRestore: false };
     }
@@ -543,14 +578,19 @@ function parseZone(value: unknown): SmartDetectZoneSnapshot | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
-  const raw = controllerZoneRecord(value as Record<string, unknown>);
-  const parsedPoints = parsePoints(raw.points);
+  const record = value as Record<string, unknown>;
+  // Snapshot fields are the outer layer. Nested `raw` is only the controller
+  // object sent back on a later PATCH, so an older wrapper cannot replace
+  // object types or sensitivity the snapshot already recorded.
+  const raw = controllerZoneRecord(record);
+  const parsedPoints = parsePoints(record.points);
   return {
-    id: typeof raw.id === 'number' && Number.isFinite(raw.id) ? raw.id : null,
-    name: typeof raw.name === 'string' ? raw.name : '',
+    id: typeof record.id === 'number' && Number.isFinite(record.id) ? record.id : null,
+    name: typeof record.name === 'string' ? record.name : '',
     points: parsedPoints,
-    sensitivity: typeof raw.sensitivity === 'number' && Number.isFinite(raw.sensitivity) ? raw.sensitivity : null,
-    objectTypes: asList(raw.objectTypes),
+    sensitivity:
+      typeof record.sensitivity === 'number' && Number.isFinite(record.sensitivity) ? record.sensitivity : null,
+    objectTypes: asList(record.objectTypes),
     raw,
   };
 }
@@ -677,89 +717,6 @@ function zoneLists(config: SmartDetectConfig): SmartDetectZoneSnapshot[] {
  * Saved types are gone, and every type still on the camera sits on a list the
  * snapshot left empty. That is the controller refilling a list, not a new user config.
  */
-function omitTypesSavedAsEmpty(chosen: SmartDetectConfig, saved: SmartDetectConfig): SmartDetectConfig {
-  if (saved.settingsPresent) {
-    for (const key of LIST_KEYS) {
-      if (saved[key].length === 0) {
-        chosen[key] = [];
-      }
-    }
-  }
-  chosen.zones = emptyTypesWhereBaselineEmpty(chosen.zones, saved.zones);
-  chosen.secondLensZones = emptyTypesWhereBaselineEmpty(chosen.secondLensZones, saved.secondLensZones);
-  return chosen;
-}
-
-function emptyTypesWhereBaselineEmpty(
-  live: SmartDetectZoneSnapshot[] | null,
-  saved: SmartDetectZoneSnapshot[] | null,
-): SmartDetectZoneSnapshot[] | null {
-  if (live === null || saved === null) {
-    return live;
-  }
-  return live.map((zone) => {
-    const match =
-      saved.find((item) => zoneStructureEqual(zone, item)) ?? saved.find((item) => sameZoneIdentity(zone, item));
-    if (!match || match.objectTypes.length > 0) {
-      return zone;
-    }
-    return withObjectTypes(zone, []);
-  });
-}
-
-type ClearOutcome = 'empty' | 'cleared' | 'refilled' | 'partial';
-
-function classifyClear(owned: string[], actual: string[]): ClearOutcome {
-  if (owned.length === 0) {
-    return 'empty';
-  }
-  const ownedSet = new Set(owned);
-  if (!actual.every((type) => ownedSet.has(type))) {
-    return 'partial';
-  }
-  const kept = actual.filter((type) => ownedSet.has(type));
-  if (kept.length === 0) {
-    return 'cleared';
-  }
-  if (kept.length === owned.length) {
-    return 'refilled';
-  }
-  return 'partial';
-}
-
-function collectZoneRefill(
-  baseline: SmartDetectZoneSnapshot[] | null,
-  actual: SmartDetectZoneSnapshot[] | null,
-  list: 'zone' | 'secondLensZone',
-): { clearedSomething: boolean; partial: boolean; refilled: SmartDetectEnforcedType[] } | null {
-  if (baseline === null) {
-    return { clearedSomething: false, partial: false, refilled: [] };
-  }
-  const pairs = pairZones(baseline, actual);
-  if (!pairs) {
-    return null;
-  }
-  const refilled: SmartDetectEnforcedType[] = [];
-  let clearedSomething = false;
-  let partial = false;
-  for (const pair of pairs) {
-    const outcome = classifyClear(pair.baseline.objectTypes, pair.actual.objectTypes);
-    if (outcome === 'cleared') {
-      clearedSomething = true;
-    } else if (outcome === 'partial') {
-      partial = true;
-    } else if (outcome === 'refilled') {
-      refilled.push({
-        list,
-        zoneId: pair.actual.id,
-        zoneName: pair.actual.name || null,
-        types: [...pair.baseline.objectTypes].sort(),
-      });
-    }
-  }
-  return { clearedSomething, partial, refilled };
-}
-
 function liveHasOnlyUnsavedTypes(baseline: SmartDetectConfig, actual: SmartDetectConfig): boolean {
   if (!structuresAlign(baseline, actual) || smartDetectOwnedTypesRemain(baseline, actual)) {
     return false;

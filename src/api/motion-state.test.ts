@@ -8,6 +8,7 @@ import {
   smartDetectDrift,
 } from './motion-state.js';
 import {
+  confirmedEnforcedTypes,
   listSmartDetectEnforcedTypes,
   planSmartDetectWrite,
   refilledAfterClear,
@@ -285,8 +286,15 @@ describe('motion state', () => {
       saved,
     );
     expect(whileOn.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
-    expect(whileOn.config?.secondLensZones?.[0]?.objectTypes).toEqual([]);
-    expect(whileOn.config?.secondLensZones?.[0]?.raw.objectTypes).toEqual([]);
+    expect(whileOn.config?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+    const recorded = planSmartDetectWrite(
+      false,
+      cameraFromConfig('Entrance Doorbell', dualLensConfig(['person', 'vehicle'], ['package'])),
+      saved,
+      [{ list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] }],
+    );
+    expect(recorded.config?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(recorded.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
     expect(whileOn.patch.smartDetectZones?.[0]).toMatchObject({ objectTypes: [] });
     expect(whileOn.patch.secondLensSmartDetectZones?.[0]).toMatchObject({ objectTypes: [] });
 
@@ -311,29 +319,30 @@ describe('motion state', () => {
     expect(smartDetectObligationMet(true, saved, added)).toBe(false);
   });
 
-  it('treats a fully refilled list as enforced only when another saved list did clear', () => {
+  it('does not treat one uncleared readback as proof a controller forced the type', () => {
     const poisoned = dualLensConfig(['person', 'vehicle'], ['package']);
     const refilled = dualLensConfig([], ['package']);
-    const untouched = dualLensConfig(['person', 'vehicle'], ['package']);
-    const partial = dualLensConfig(['person'], ['package']);
+    const yardAndDrive = dualLensConfig(['person'], ['vehicle']);
+    yardAndDrive.secondLensZones = null;
+    const driveStayed = dualLensConfig([], ['vehicle']);
+    driveStayed.secondLensZones = null;
+    const secondPerson = dualLensConfig(['person', 'vehicle'], ['person']);
 
-    expect(refilledAfterClear(poisoned, refilled)).toEqual([
+    expect(refilledAfterClear(poisoned, refilled)).toBeNull();
+    expect(refilledAfterClear(secondPerson, dualLensConfig([], ['person']))).toBeNull();
+    expect(refilledAfterClear(yardAndDrive, driveStayed)).toBeNull();
+  });
+
+  it('confirms a type only when clearing that list again leaves it in place', () => {
+    const written = dualLensConfig([], []);
+    const before = dualLensConfig([], ['package']);
+    const stillThere = dualLensConfig([], ['package']);
+    const cleared = dualLensConfig([], []);
+
+    expect(confirmedEnforcedTypes(written, before, stillThere)).toEqual([
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
-    expect(refilledAfterClear(poisoned, untouched)).toBeNull();
-    expect(refilledAfterClear(poisoned, partial)).toBeNull();
-    expect(refilledAfterClear(dualLensConfig(['person', 'vehicle'], []), refilled)).toBeNull();
-
-    const zoneStayed = dualLensConfig(['person', 'vehicle'], []);
-    zoneStayed.objectTypes = ['person', 'vehicle'];
-    zoneStayed.zones = zoneStayed.zones?.slice(0, 1) ?? null;
-    zoneStayed.secondLensZones = null;
-    const settingsCleared = {
-      ...zoneStayed,
-      objectTypes: [] as string[],
-      zones: zoneStayed.zones?.map((zone) => ({ ...zone, objectTypes: ['person', 'vehicle'] })) ?? null,
-    };
-    expect(refilledAfterClear(zoneStayed, settingsCleared)).toBeNull();
+    expect(confirmedEnforcedTypes(written, before, cleared)).toEqual([]);
   });
 
   it('unwraps a zone raw that was nested by an earlier snapshot', () => {
@@ -378,10 +387,45 @@ describe('motion state', () => {
 
     const once = sanitizeSmartDetectConfig(wrapped);
     const twice = sanitizeSmartDetectConfig(once);
+    expect(once?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(once?.zones?.[0]?.sensitivity).toBe(50);
     expect(once?.zones?.[0]?.raw).toEqual(controller);
     expect(once?.zones?.[0]?.raw).not.toHaveProperty('raw');
     expect(twice?.zones?.[0]?.raw).toEqual(controller);
     expect(JSON.stringify(twice?.zones?.[0]?.raw)).not.toContain('"raw"');
+
+    const diverged = sanitizeSmartDetectConfig({
+      objectTypes: [],
+      audioTypes: [],
+      autoTrackingObjectTypes: [],
+      settingsPresent: true,
+      zones: [
+        {
+          id: 1,
+          name: 'Default',
+          points,
+          sensitivity: 80,
+          objectTypes: ['person'],
+          raw: {
+            id: 1,
+            name: 'Default',
+            points,
+            sensitivity: 80,
+            objectTypes: ['person'],
+            raw: {
+              id: 1,
+              name: 'Default',
+              points,
+              sensitivity: 50,
+              objectTypes: ['person', 'package'],
+            },
+          },
+        },
+      ],
+      secondLensZones: null,
+    });
+    expect(diverged?.zones?.[0]?.objectTypes).toEqual(['person']);
+    expect(diverged?.zones?.[0]?.sensitivity).toBe(80);
   });
 
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {

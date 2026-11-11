@@ -777,7 +777,7 @@ describe('smart detection snapshots', () => {
     expect(yard.smartDetectSettings.objectTypes).toEqual([]);
   });
 
-  it('records smart detection readback drift when zones stay enabled', async () => {
+  it('clears a zone on the follow-up write and keeps that zone in the snapshot', async () => {
     store = zonedCamera(
       'cam1',
       'Front Door',
@@ -790,13 +790,17 @@ describe('smart detection snapshots', () => {
         [0.5, 0.5],
       ],
     );
+    let zoneWrites = 0;
     apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
       applyPatch(store, payload);
-      if (store.smartDetectZones) {
-        store.smartDetectZones = store.smartDetectZones.map((entry) => ({
-          ...entry,
-          objectTypes: ['person', 'vehicle'],
-        }));
+      if (payload.smartDetectZones) {
+        zoneWrites += 1;
+        if (zoneWrites === 1 && store.smartDetectZones) {
+          store.smartDetectZones = store.smartDetectZones.map((entry) => ({
+            ...entry,
+            objectTypes: ['person', 'vehicle'],
+          }));
+        }
       }
       return structuredClone(store);
     });
@@ -805,7 +809,10 @@ describe('smart detection snapshots', () => {
 
     const outcome = await client.updateCameraSmartDetection(camera, false);
 
-    expect(outcome.smartDetectResult).toBe('mismatch');
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(apiState.updateDevice).toHaveBeenCalledTimes(2);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(outcome.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
     expect(store.recordingSettings.enableMotionDetection).toBe(true);
     const snapshot = client.getCameraSnapshot('cam1');
     const health = buildHealthReport({
@@ -833,15 +840,15 @@ describe('smart detection snapshots', () => {
       ],
     });
     const cameraHealth = health.controllers[0]?.cameras[0];
-    expect(cameraHealth?.drift).toBe(true);
-    expect(cameraHealth?.smartDetectDrift).toBe(true);
-    expect(cameraHealth?.readback.status).toBe('mismatch');
+    expect(cameraHealth?.drift).toBe(false);
+    expect(cameraHealth?.smartDetectDrift).toBe(false);
+    expect(cameraHealth?.readback.status).toBe('verified');
     expect(cameraHealth?.smartDetectExpected?.zones?.[0]).toMatchObject({
       name: 'Porch',
       sensitivity: 75,
       objectTypes: [],
     });
-    expect(cameraHealth?.smartDetectActual?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(cameraHealth?.smartDetectActual?.zones?.[0]?.objectTypes).toEqual([]);
   });
 
   it('turns smart detection off when the controller refills an empty second-lens list', async () => {
@@ -864,8 +871,8 @@ describe('smart detection snapshots', () => {
     const outcome = await client.updateCameraSmartDetection(doorbell, false);
 
     expect(outcome.smartDetectResult).toBe('ok');
-    expect(apiState.updateDevice).toHaveBeenCalledTimes(1);
-    expect(apiState.retrieve).toHaveBeenCalledTimes(2);
+    expect(apiState.updateDevice).toHaveBeenCalledTimes(2);
+    expect(apiState.retrieve).toHaveBeenCalledTimes(3);
     expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
     expect(store.smartDetectSettings.objectTypes).toEqual([]);
@@ -1065,7 +1072,10 @@ describe('smart detection snapshots', () => {
     const healed = await client.updateCameraSmartDetection(doorbell, false);
 
     expect(healed.smartDetectResult).toBe('ok');
-    expect(apiState.retrieve).toHaveBeenCalledTimes(2);
+    expect(apiState.updateDevice).toHaveBeenCalledTimes(2);
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
     expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
     expect(healed.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
@@ -1115,14 +1125,68 @@ describe('smart detection snapshots', () => {
       'ok',
       'ok',
     ]);
-    expect(apiState.updateDevice).toHaveBeenCalledTimes(4);
+    expect(apiState.updateDevice).toHaveBeenCalledTimes(5);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
     expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
     expect(secondLensTypes(dir)).toEqual([]);
     expect(mainLensTypes(dir)).toEqual(['person', 'vehicle']);
     expect(log.error).not.toHaveBeenCalled();
-    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('saved snapshot was not changed'));
-    expect(log.info).not.toHaveBeenCalledWith(expect.stringContaining('removed from the saved snapshot'));
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('removed from the saved snapshot'));
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+  });
+
+  it('does not drop a zone the follow-up clear manages to empty', async () => {
+    const yard = zonedCamera(
+      'yard',
+      'Yard',
+      'Yard',
+      50,
+      ['person'],
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+      ],
+    );
+    yard.smartDetectZones?.push({
+      id: 2,
+      name: 'Drive',
+      color: '#123456',
+      points: [
+        [0.1, 0.1],
+        [0.4, 0.1],
+        [0.4, 0.4],
+      ],
+      sensitivity: 40,
+      objectTypes: ['vehicle'],
+    });
+    store = yard;
+    let zoneWrites = 0;
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      if (payload.smartDetectZones) {
+        zoneWrites += 1;
+        if (zoneWrites === 1 && store.smartDetectZones) {
+          store.smartDetectZones = store.smartDetectZones.map((entry, index) =>
+            index === 1 ? { ...entry, objectTypes: ['vehicle'] } : entry,
+          );
+        }
+      }
+      return structuredClone(store);
+    });
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    const client = connectedClient();
+
+    const outcome = await client.updateCameraSmartDetection({ id: 'yard', name: 'Yard' } as ProtectCamera, false);
+
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(zoneWrites).toBe(2);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(store.smartDetectZones?.[1]?.objectTypes).toEqual([]);
+    expect(outcome.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person']);
+    expect(outcome.smartDetectConfig?.zones?.[1]?.objectTypes).toEqual(['vehicle']);
   });
 });
 

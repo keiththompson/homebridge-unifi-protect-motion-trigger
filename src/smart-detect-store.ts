@@ -7,6 +7,7 @@ import {
   type SmartDetectConfig,
   smartDetectConfigActive,
   smartDetectConfigsEqual,
+  type SmartDetectEnforcedType,
 } from './api/smart-detect.js';
 import { SMART_DETECT_SNAPSHOT_FILENAME } from './settings.js';
 
@@ -16,11 +17,22 @@ interface StoredCamera {
   name: string;
   savedAt: string;
   config: SmartDetectConfig;
+  /** Types a second clear of the same list put back. Omitted on disk when empty. */
+  enforced: SmartDetectEnforcedType[];
+}
+
+interface SnapshotCameraFile {
+  controllerAddress: string;
+  cameraId: string;
+  name: string;
+  savedAt: string;
+  config: SmartDetectConfig;
+  enforced?: SmartDetectEnforcedType[];
 }
 
 interface SnapshotFile {
   version: 1;
-  cameras: StoredCamera[];
+  cameras: SnapshotCameraFile[];
 }
 
 export interface SnapshotStoreLogger {
@@ -76,10 +88,42 @@ export class SmartDetectSnapshotStore {
         name,
         savedAt: new Date().toISOString(),
         config,
+        enforced: existing?.enforced ?? [],
       });
       this.flush();
     }
     return cloneSmartDetectConfig(config);
+  }
+
+  /** Types confirmed by a second clear. Empty when this camera has none. */
+  public getEnforced(controllerAddress: string, cameraId: string): SmartDetectEnforcedType[] {
+    this.ensureLoaded();
+    const stored = this.cameras.get(storageKey(controllerAddress, cameraId));
+    return (stored?.enforced ?? []).map((entry) => ({ ...entry, types: [...entry.types] }));
+  }
+
+  /** Records types that came back unchanged from a second clear of the same list. */
+  public rememberEnforced(
+    controllerAddress: string,
+    cameraId: string,
+    name: string,
+    incoming: SmartDetectEnforcedType[],
+  ): void {
+    this.ensureLoaded();
+    const key = storageKey(controllerAddress, cameraId);
+    const existing = this.cameras.get(key);
+    if (!existing || incoming.length === 0) {
+      return;
+    }
+    const merged = mergeEnforced(existing.enforced, incoming);
+    if (enforcedEqual(existing.enforced, merged)) {
+      return;
+    }
+    existing.enforced = merged;
+    if (name) {
+      existing.name = name;
+    }
+    this.flush();
   }
 
   private ensureLoaded(): void {
@@ -152,6 +196,9 @@ export class SmartDetectSnapshotStore {
         name: entry.name,
         savedAt: entry.savedAt,
         config: cloneSmartDetectConfig(entry.config),
+        ...(entry.enforced.length > 0
+          ? { enforced: entry.enforced.map((item) => ({ ...item, types: [...item.types] })) }
+          : {}),
       })),
     };
     const dest = join(dir, SMART_DETECT_SNAPSHOT_FILENAME);
@@ -217,5 +264,72 @@ function sanitizeEntry(value: unknown): StoredCamera | null {
     name: typeof record.name === 'string' ? record.name : record.cameraId,
     savedAt: typeof record.savedAt === 'string' ? record.savedAt : '',
     config,
+    enforced: sanitizeEnforced(record.enforced),
   };
+}
+
+const ENFORCED_LISTS = new Set(['objectTypes', 'audioTypes', 'autoTrackingObjectTypes', 'zone', 'secondLensZone']);
+
+function sanitizeEnforced(value: unknown): SmartDetectEnforcedType[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const enforced: SmartDetectEnforcedType[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.list !== 'string' || !ENFORCED_LISTS.has(record.list)) {
+      continue;
+    }
+    const types = Array.isArray(record.types)
+      ? record.types.filter((item): item is string => typeof item === 'string')
+      : [];
+    if (types.length === 0) {
+      continue;
+    }
+    enforced.push({
+      list: record.list as SmartDetectEnforcedType['list'],
+      zoneId: typeof record.zoneId === 'number' && Number.isFinite(record.zoneId) ? record.zoneId : null,
+      zoneName: typeof record.zoneName === 'string' ? record.zoneName : null,
+      types,
+    });
+  }
+  return enforced;
+}
+
+function mergeEnforced(
+  current: SmartDetectEnforcedType[],
+  incoming: SmartDetectEnforcedType[],
+): SmartDetectEnforcedType[] {
+  const merged = current.map((entry) => ({ ...entry, types: [...entry.types] }));
+  for (const entry of incoming) {
+    const existing = merged.find(
+      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
+    );
+    if (!existing) {
+      merged.push({ ...entry, types: [...entry.types].sort() });
+      continue;
+    }
+    existing.types = [...new Set([...existing.types, ...entry.types])].sort();
+  }
+  return merged;
+}
+
+function enforcedEqual(left: SmartDetectEnforcedType[], right: SmartDetectEnforcedType[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((entry) => {
+    const other = right.find(
+      (item) => item.list === entry.list && item.zoneId === entry.zoneId && item.zoneName === entry.zoneName,
+    );
+    if (!other || other.types.length !== entry.types.length) {
+      return false;
+    }
+    const types = [...entry.types].sort();
+    const otherTypes = [...other.types].sort();
+    return types.every((type, index) => type === otherTypes[index]);
+  });
 }

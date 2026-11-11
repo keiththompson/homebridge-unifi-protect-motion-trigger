@@ -2,7 +2,6 @@ import type { SmartDetectConfig } from './smart-detect.js';
 import {
   preferencesFromConfig,
   readSmartDetectConfig,
-  refilledAfterClear,
   smartDetectConfigActive,
   smartDetectObligationMet,
   smartDetectStateMatches,
@@ -95,14 +94,9 @@ export function motionReadbackMatches(camera: ProtectCamera, expected: MotionRea
   if (expected.smartDetectConfig) {
     const live = readSmartDetectConfig(camera);
     if (expected.smartDetectBaseline) {
-      const enabling = expected.smartDetectEnabling === true;
-      if (smartDetectObligationMet(enabling, expected.smartDetectBaseline, live)) {
-        return true;
+      if (!smartDetectObligationMet(expected.smartDetectEnabling === true, expected.smartDetectBaseline, live)) {
+        return false;
       }
-      // A saved type that comes straight back, after some other saved type did
-      // clear, is the controller refilling that list. The snapshot is healed
-      // by the caller. An unchanged camera is not this case.
-      return !enabling && refilledAfterClear(expected.smartDetectBaseline, live) !== null;
     } else if (!smartDetectStateMatches(expected.smartDetectConfig, live)) {
       return false;
     }
