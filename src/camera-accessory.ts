@@ -50,8 +50,8 @@ export class CameraAccessory {
         ? camera.recordingSettings.enableMotionDetection
         : true;
     this.isMotionEnabled = motionEnabled;
-    // The switch is on only when every saved snapshot type is present. Types the
-    // controller adds on its own do not turn it on.
+    // The switch stays on while any saved type remains, unless a saved zone or
+    // lens has lost every one of its types. Controller-added types do not turn it on.
     // A camera discovered with detection already off does not save an empty snapshot.
     this.isSmartDetectEnabled = smartDetectEffectivelyEnabled(readSmartDetectConfig(camera), this.smartDetectConfig);
 

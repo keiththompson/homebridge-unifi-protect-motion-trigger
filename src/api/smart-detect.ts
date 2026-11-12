@@ -143,10 +143,11 @@ export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig
 /**
  * Picks the config to keep so the Smart Detection switch can turn it back on.
  * An active camera read replaces the saved snapshot. A disabled read does not.
- * A live camera that has dropped a saved zone type is half-off or controller-forced
- * and does not replace the snapshot. A live camera whose saved types are already
- * gone, and whose only remaining types sit on lists the snapshot left empty, does
- * not replace the snapshot either.
+ * A live camera that has lost every saved type on a zone or lens is half-off
+ * and does not replace the snapshot. A camera that still has some of those types
+ * is adopted, including a type removed in the controller. A live camera whose
+ * saved types are already gone, and whose only remaining types sit on lists the
+ * snapshot left empty, does not replace the snapshot either.
  * Settings lists that were already cleared (1.0.11 only cleared those) are kept
  * from the saved snapshot when the live zones are still the user's zones.
  */
@@ -247,9 +248,9 @@ export function listSmartDetectEnforcedTypes(
 }
 
 /**
- * Switch position. On means every saved snapshot type is present.
- * Types the controller adds on its own do not turn the switch on, and one
- * forced type does not count as on while a saved type is missing.
+ * Switch position. With a saved snapshot, the switch stays on while any saved
+ * type remains, unless a saved zone or lens has lost every one of its types.
+ * Types the controller adds on its own do not turn the switch on.
  */
 export function smartDetectEffectivelyEnabled(
   live: SmartDetectConfig | null | undefined,
@@ -308,10 +309,15 @@ export function withoutEnforcedTypes(
     if (!zones) {
       continue;
     }
-    const index = zones.findIndex(
-      (zone) =>
-        (entry.zoneId !== null && zone.id === entry.zoneId) ||
-        (entry.zoneName !== null && entry.zoneName !== '' && zone.name === entry.zoneName),
+    const index = zones.findIndex((zone) =>
+      sameZoneIdentity(zone, {
+        id: entry.zoneId,
+        name: entry.zoneName ?? '',
+        points: null,
+        sensitivity: null,
+        objectTypes: [],
+        raw: {},
+      }),
     );
     const zone = index >= 0 ? zones[index] : undefined;
     if (!zone) {
@@ -557,36 +563,26 @@ function removeTypes(types: string[], drop: string[]): string[] {
   return types.filter((type) => !unwanted.has(type));
 }
 
-/** True when a saved zone type is absent. Settings-only snapshots are not half-off. */
+/** True when a saved zone or lens has lost every one of its saved types. */
 function savedZoneTypesMissing(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
-  return !zoneTypesPresent(saved.zones, live.zones) || !zoneTypesPresent(saved.secondLensZones, live.secondLensZones);
+  return savedZoneEmptied(saved.zones, live.zones) || savedZoneEmptied(saved.secondLensZones, live.secondLensZones);
 }
 
 function snapshotTypesPresent(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
-  if (saved.settingsPresent) {
-    for (const key of LIST_KEYS) {
-      if (!typesPresent(saved[key], live[key])) {
-        return false;
-      }
-    }
-  }
-  return zoneTypesPresent(saved.zones, live.zones) && zoneTypesPresent(saved.secondLensZones, live.secondLensZones);
+  return smartDetectOwnedTypesRemain(saved, live) && !savedZoneTypesMissing(saved, live);
 }
 
-function zoneTypesPresent(saved: SmartDetectZoneSnapshot[] | null, live: SmartDetectZoneSnapshot[] | null): boolean {
+function savedZoneEmptied(saved: SmartDetectZoneSnapshot[] | null, live: SmartDetectZoneSnapshot[] | null): boolean {
   if (!saved) {
-    return true;
+    return false;
   }
-  for (const zone of saved) {
+  return saved.some((zone) => {
     if (zone.objectTypes.length === 0) {
-      continue;
-    }
-    const match = (live ?? []).find((candidate) => sameZoneIdentity(zone, candidate));
-    if (!match || !typesPresent(zone.objectTypes, match.objectTypes)) {
       return false;
     }
-  }
-  return true;
+    const match = (live ?? []).find((candidate) => sameZoneIdentity(zone, candidate));
+    return !match || typesCleared(zone.objectTypes, match.objectTypes);
+  });
 }
 
 function listsEqual(left: SmartDetectPreferences | null, right: SmartDetectPreferences | null): boolean {

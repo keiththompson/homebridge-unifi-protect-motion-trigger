@@ -310,8 +310,20 @@ describe('motion state', () => {
     expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
     expect(plan.config?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
     expect(smartDetectEffectivelyEnabled(halfOff, saved)).toBe(false);
-    expect(smartDetectEffectivelyEnabled(dualLensConfig(['person'], ['package']), saved)).toBe(false);
+    expect(smartDetectEffectivelyEnabled(dualLensConfig(['person'], ['package']), saved)).toBe(true);
     expect(smartDetectEffectivelyEnabled(saved, saved)).toBe(true);
+  });
+
+  it('adopts a detection type removed while detection is still on', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], []);
+    saved.objectTypes = ['person', 'vehicle'];
+    const edited = dualLensConfig(['person'], []);
+    edited.objectTypes = ['person'];
+
+    expect(smartDetectEffectivelyEnabled(edited, saved)).toBe(true);
+    const plan = planSmartDetectWrite(false, cameraFromConfig('Test Camera', edited), saved);
+    expect(plan.config?.objectTypes).toEqual(['person']);
+    expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person']);
   });
 
   it('treats an unchanged refilled list as enforced and an unchanged camera as ignored', () => {
