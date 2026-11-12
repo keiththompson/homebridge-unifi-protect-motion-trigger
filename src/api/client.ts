@@ -22,12 +22,9 @@ import {
   listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
   novelResidualTypes,
-  omitTypesFromPatch,
   patchForResidualLists,
   planSmartDetectWrite,
   preferencesFromConfig,
-  probeTypesAbsent,
-  probeTypesPresent,
   readSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectConfigActive,
@@ -37,7 +34,6 @@ import {
   type SmartDetectWritePlan,
   survivingUnownedTypes,
   typesStillOwned,
-  typesToProbeOnRestore,
   withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
 } from './smart-detect.js';
@@ -462,16 +458,6 @@ export class ProtectClient {
       expected.createMotionEvents = settings.motion;
     }
 
-    let restoreProbe: SmartDetectEnforcedType[] = [];
-    let restorePatch: SmartDetectPatch | null = null;
-    if (settings.smartDetect === true && liveCamera && keptConfig && smartPlan?.patch) {
-      restoreProbe = typesToProbeOnRestore(keptConfig, readSmartDetectConfig(liveCamera));
-      if (restoreProbe.length > 0) {
-        restorePatch = structuredClone(smartPlan.patch);
-        omitTypesFromPatch(smartPlan.patch, restoreProbe);
-      }
-    }
-
     const payload = this.buildPayload(settings, smartSkipped ? null : smartPlan);
     if (!payloadHasChanges(payload)) {
       const already =
@@ -531,6 +517,7 @@ export class ProtectClient {
         const confirmedCamera = await this.confirmEnforcedTypes(
           camera,
           smartPlan,
+          keptConfig,
           liveCamera,
           observed,
           expected,
@@ -542,22 +529,6 @@ export class ProtectClient {
             config = confirmedCamera.config;
             droppedRefill = true;
           }
-        }
-      }
-      if (observed && settings.smartDetect === true && restoreProbe.length > 0 && restorePatch && config) {
-        const probed = await this.finishRestoreProbe(
-          camera,
-          restoreProbe,
-          restorePatch,
-          observed,
-          expected,
-          config,
-          budget,
-        );
-        observed = probed.camera;
-        if (probed.dropped && probed.config) {
-          config = probed.config;
-          droppedRefill = true;
         }
       }
       if (observed) {
@@ -669,6 +640,7 @@ export class ProtectClient {
   private async confirmEnforcedTypes(
     camera: ProtectCamera,
     plan: SmartDetectWritePlan,
+    previous: SmartDetectConfig | null,
     beforeWriteCamera: ProtectCamera,
     observed: ProtectCamera,
     expected: MotionReadbackExpectation,
@@ -697,7 +669,10 @@ export class ProtectClient {
     }
     const after = readSmartDetectConfig(current);
     const added = novelResidualTypes(
-      [...addedByController(beforeWrite, written, after), ...survivingUnownedTypes(beforeWrite, written, after)],
+      [
+        ...addedByController(beforeWrite, written, after),
+        ...survivingUnownedTypes(previous, beforeWrite, written, after),
+      ],
       this.enforcedTypes(camera),
     );
     if (added.length === 0) {
@@ -718,54 +693,6 @@ export class ProtectClient {
     this.persistSmartDetectSnapshot(camera, stripped);
     expected.smartDetectBaseline = stripped;
     return { camera: current, config: stripped, dropped: true };
-  }
-
-  /**
-   * A drifted restore omits types that are already on the camera. If the
-   * controller puts them back, they are enforced and leave the snapshot.
-   * If it accepts the omission, they are written back.
-   */
-  private async finishRestoreProbe(
-    camera: ProtectCamera,
-    probe: SmartDetectEnforcedType[],
-    originalPatch: SmartDetectPatch,
-    observed: ProtectCamera,
-    expected: MotionReadbackExpectation,
-    baseline: SmartDetectConfig,
-    budget: SessionRecoveryBudget,
-  ): Promise<{ camera: ProtectCamera; config: SmartDetectConfig | null; dropped: boolean }> {
-    let current = observed;
-    const cameBack = probeTypesPresent(probe, readSmartDetectConfig(current));
-    const absent = probeTypesAbsent(probe, readSmartDetectConfig(current));
-    let dropped = false;
-    let config: SmartDetectConfig | null = null;
-    if (cameBack.length > 0) {
-      this.persistEnforcedTypes(camera, cameBack);
-      const stripped = withoutRefilledTypes(baseline, cameBack);
-      if (smartDetectConfigActive(stripped) && !smartDetectConfigsEqual(stripped, baseline)) {
-        this.persistSmartDetectSnapshot(camera, stripped);
-        expected.smartDetectBaseline = stripped;
-        if (expected.smartDetectEnabling) {
-          expected.smartDetectConfig = stripped;
-        }
-        config = stripped;
-        dropped = true;
-      }
-    }
-    if (absent.length > 0) {
-      const follow: CameraWritePayload = {};
-      applySmartPatch(follow, patchForResidualLists(originalPatch, absent));
-      if (payloadHasSmartDetect(follow)) {
-        const wrote = await this.writeDevice(camera, follow, budget);
-        if (wrote.ok) {
-          const again = await this.fetchCameraRecord(camera, budget);
-          if (again) {
-            current = again;
-          }
-        }
-      }
-    }
-    return { camera: current, config, dropped };
   }
 
   private dropAbsentEnforcedTypes(camera: ProtectCamera, actual: SmartDetectConfig): void {

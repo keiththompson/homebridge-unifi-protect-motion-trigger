@@ -335,10 +335,10 @@ describe('motion state', () => {
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
     const previous = dualLensConfig(['person', 'vehicle'], []);
-    expect(survivingUnownedTypes(packageAlready, empty, packageAdded)).toEqual([
+    expect(survivingUnownedTypes(previous, packageAlready, empty, packageAdded)).toEqual([
       { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
     ]);
-    expect(survivingUnownedTypes(previous, empty, packageAdded)).toEqual([]);
+    expect(survivingUnownedTypes(packageAlready, packageAlready, empty, packageAdded)).toEqual([]);
   });
 
   it('does not treat a half-off doorbell as on because package remains', () => {
