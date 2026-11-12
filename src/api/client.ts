@@ -21,6 +21,7 @@ import {
   listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
   novelResidualTypes,
+  partitionUnconfirmedTypes,
   patchForResidualLists,
   planSmartDetectWrite,
   preferencesFromConfig,
@@ -631,6 +632,13 @@ export class ProtectClient {
     return this.enforcedSmartDetect(camera.id);
   }
 
+  private unconfirmedTypes(camera: ProtectCamera): SmartDetectEnforcedType[] {
+    if (!this.smartDetectStore || !this.controllerAddress) {
+      return [];
+    }
+    return this.smartDetectStore.getUnconfirmed(this.controllerAddress, camera.id);
+  }
+
   /**
    * Types the controller adds to a list this write left empty are recorded.
    * Types that were already there are cleared once more. If they remain, the
@@ -671,15 +679,27 @@ export class ProtectClient {
       readbackEnforcedTypes(previous, beforeWrite, written, after),
       this.enforcedTypes(camera),
     );
-    if (added.length === 0) {
+    const pending = this.unconfirmedTypes(camera);
+    const decision = partitionUnconfirmedTypes(previous, beforeWrite, written, after, pending, added);
+    if (decision.mark.length > 0) {
+      this.persistUnconfirmedTypes(camera, decision.mark);
+    }
+    if (decision.clear.length > 0) {
+      this.dropUnconfirmedTypes(camera, decision.clear);
+    }
+    const confirmed = novelResidualTypes([...added, ...decision.settle], this.enforcedTypes(camera));
+    if (decision.settle.length > 0) {
+      this.dropUnconfirmedTypes(camera, decision.settle);
+    }
+    if (confirmed.length === 0) {
       return { camera: current, config: null, dropped: false };
     }
-    this.persistEnforcedTypes(camera, added);
+    this.persistEnforcedTypes(camera, confirmed);
     const baseline = expected.smartDetectBaseline;
     if (!baseline) {
       return { camera: current, config: null, dropped: false };
     }
-    const stripped = withoutRefilledTypes(baseline, added);
+    const stripped = withoutRefilledTypes(baseline, confirmed);
     if (
       (smartDetectConfigActive(baseline) && !smartDetectConfigActive(stripped)) ||
       smartDetectConfigsEqual(stripped, baseline)
@@ -700,6 +720,28 @@ export class ProtectClient {
       this.smartDetectStore.dropEnforced(this.controllerAddress, camera.id, absent);
     } catch (error) {
       this.log.error(`Could not update enforced smart detection types for ${camera.name}: ${errorText(error)}`);
+    }
+  }
+
+  private persistUnconfirmedTypes(camera: ProtectCamera, unconfirmed: SmartDetectEnforcedType[]): void {
+    if (!this.smartDetectStore || !this.controllerAddress) {
+      return;
+    }
+    try {
+      this.smartDetectStore.rememberUnconfirmed(this.controllerAddress, camera.id, camera.name, unconfirmed);
+    } catch (error) {
+      this.log.error(`Could not save unconfirmed smart detection types for ${camera.name}: ${errorText(error)}`);
+    }
+  }
+
+  private dropUnconfirmedTypes(camera: ProtectCamera, absent: SmartDetectEnforcedType[]): void {
+    if (!this.smartDetectStore || !this.controllerAddress) {
+      return;
+    }
+    try {
+      this.smartDetectStore.dropUnconfirmed(this.controllerAddress, camera.id, absent);
+    } catch (error) {
+      this.log.error(`Could not update unconfirmed smart detection types for ${camera.name}: ${errorText(error)}`);
     }
   }
 

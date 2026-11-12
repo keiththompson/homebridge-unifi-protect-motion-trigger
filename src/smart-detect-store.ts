@@ -20,6 +20,8 @@ interface StoredCamera {
   config: SmartDetectConfig;
   /** Types a second clear of the same list put back. Omitted on disk when empty. */
   enforced: SmartDetectEnforcedType[];
+  /** Types whose owner is not known yet. Omitted on disk when empty. */
+  unconfirmed: SmartDetectEnforcedType[];
 }
 
 interface SnapshotCameraFile {
@@ -29,6 +31,7 @@ interface SnapshotCameraFile {
   savedAt: string;
   config: SmartDetectConfig;
   enforced?: SmartDetectEnforcedType[];
+  unconfirmed?: SmartDetectEnforcedType[];
 }
 
 interface SnapshotFile {
@@ -90,6 +93,7 @@ export class SmartDetectSnapshotStore {
         savedAt: new Date().toISOString(),
         config,
         enforced: existing?.enforced ?? [],
+        unconfirmed: existing?.unconfirmed ?? [],
       });
       this.flush();
     }
@@ -124,6 +128,51 @@ export class SmartDetectSnapshotStore {
     if (name) {
       existing.name = name;
     }
+    this.flush();
+  }
+
+  /** Types saved on an off whose owner was not known yet. */
+  public getUnconfirmed(controllerAddress: string, cameraId: string): SmartDetectEnforcedType[] {
+    this.ensureLoaded();
+    const stored = this.cameras.get(storageKey(controllerAddress, cameraId));
+    return (stored?.unconfirmed ?? []).map((entry) => ({ ...entry, types: [...entry.types] }));
+  }
+
+  /** Remembers types to settle on the next off. */
+  public rememberUnconfirmed(
+    controllerAddress: string,
+    cameraId: string,
+    name: string,
+    incoming: SmartDetectEnforcedType[],
+  ): void {
+    this.ensureLoaded();
+    const existing = this.cameras.get(storageKey(controllerAddress, cameraId));
+    if (!existing || incoming.length === 0) {
+      return;
+    }
+    const merged = mergeEnforced(existing.unconfirmed, incoming);
+    if (enforcedEqual(existing.unconfirmed, merged)) {
+      return;
+    }
+    existing.unconfirmed = merged;
+    if (name) {
+      existing.name = name;
+    }
+    this.flush();
+  }
+
+  /** Drops unconfirmed types that were enforced or that cleared. */
+  public dropUnconfirmed(controllerAddress: string, cameraId: string, absent: SmartDetectEnforcedType[]): void {
+    this.ensureLoaded();
+    const existing = this.cameras.get(storageKey(controllerAddress, cameraId));
+    if (!existing || absent.length === 0 || existing.unconfirmed.length === 0) {
+      return;
+    }
+    const next = subtractEnforced(existing.unconfirmed, absent);
+    if (enforcedEqual(existing.unconfirmed, next)) {
+      return;
+    }
+    existing.unconfirmed = next;
     this.flush();
   }
 
@@ -215,6 +264,9 @@ export class SmartDetectSnapshotStore {
         ...(entry.enforced.length > 0
           ? { enforced: entry.enforced.map((item) => ({ ...item, types: [...item.types] })) }
           : {}),
+        ...(entry.unconfirmed.length > 0
+          ? { unconfirmed: entry.unconfirmed.map((item) => ({ ...item, types: [...item.types] })) }
+          : {}),
       })),
     };
     const dest = join(dir, SMART_DETECT_SNAPSHOT_FILENAME);
@@ -281,6 +333,7 @@ function sanitizeEntry(value: unknown): StoredCamera | null {
     savedAt: typeof record.savedAt === 'string' ? record.savedAt : '',
     config,
     enforced: sanitizeEnforced(record.enforced),
+    unconfirmed: sanitizeEnforced(record.unconfirmed),
   };
 }
 

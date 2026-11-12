@@ -18,6 +18,7 @@ import {
   type SmartDetectZoneSnapshot,
   survivingUnownedTypes,
   typesStillOwned,
+  unconfirmedSurvivorTypes,
 } from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
 
@@ -340,6 +341,9 @@ describe('motion state', () => {
     ]);
     expect(survivingUnownedTypes(packageAlready, packageAlready, empty, packageAdded)).toEqual([]);
     expect(survivingUnownedTypes(null, packageAlready, empty, packageAdded)).toEqual([]);
+    expect(unconfirmedSurvivorTypes(packageAlready, empty, packageAdded)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
     const mixed = dualLensConfig(['person', 'vehicle'], ['animal', 'package']);
     const animalCleared = dualLensConfig([], ['package']);
     expect(survivingUnownedTypes(null, mixed, empty, animalCleared)).toEqual([

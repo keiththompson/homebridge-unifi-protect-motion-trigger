@@ -290,17 +290,13 @@ export function addedByController(
 }
 
 /**
- * Types we tried to remove that are still on the camera. A second clear may
- * still remove them. They are not evidence of enforcement.
- */
-/**
  * A type that is still present after the clear, was not removed from any other
  * list, and was not in the previous snapshot. Another list must have cleared,
  * so an ignored write does not qualify. A zone that sticks while a sibling
  * zone in the same list clears is a partial apply, not enforcement. A type the
- * snapshot already stored is the user's, even when the write to that list did
- * not apply. With no snapshot, a type already on the camera is recorded only
- * when that list lost a different type and another list in the same patch changed.
+ * snapshot already stored is the user's until a later off shows the controller
+ * putting it back. With no snapshot, a type already on the camera is not
+ * recorded on this off. It is marked unconfirmed and settled on the next one.
  */
 export function survivingUnownedTypes(
   previous: SmartDetectConfig | null,
@@ -326,10 +322,6 @@ export function survivingUnownedTypes(
       if (previous) {
         return !typesForPlace(previous, entry).includes(type);
       }
-      // No saved snapshot yet. A type that was already on the camera is not
-      // evidence: an ignored write leaves it there too. Record it only when
-      // this list lost a different type, so the clear applied and this one
-      // came back, and some other list in the same patch changed.
       return firstOffTypeReappeared(entry, type, beforeWrite, written, after, cleared);
     });
     if (types.length > 0) {
@@ -359,7 +351,129 @@ function firstOffTypeReappeared(
   if (!afterTypes.has(type)) {
     return false;
   }
+  return sameListLostAnotherType(before, writtenTypes, afterTypes, type);
+}
+
+function sameListLostAnotherType(
+  before: string[],
+  writtenTypes: Set<string>,
+  afterTypes: Set<string>,
+  type: string,
+): boolean {
   return before.some((other) => other !== type && !writtenTypes.has(other) && !afterTypes.has(other));
+}
+
+/**
+ * Types that survived a clear of another list, but this list did not lose a
+ * different type. An ignored write looks the same, so they are not enforced
+ * yet. The next off records them if they survive again, or keeps them if they
+ * clear.
+ */
+export function unconfirmedSurvivorTypes(
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  const cleared = typesThatCleared(beforeWrite, written, after);
+  if (cleared.length === 0) {
+    return [];
+  }
+  const clearedTypes = new Set(cleared.flatMap((entry) => entry.types));
+  const survived = typesStillOwned(beforeWrite, written, after);
+  const result: SmartDetectEnforcedType[] = [];
+  for (const entry of survived) {
+    if (siblingZoneCleared(entry, beforeWrite, after)) {
+      continue;
+    }
+    if (!cleared.some((item) => !sameEnforcedPlace(item, entry))) {
+      continue;
+    }
+    const writtenTypes = new Set(typesForPlace(written, entry));
+    const before = typesForPlace(beforeWrite, entry);
+    const afterTypes = new Set(typesForPlace(after, entry));
+    const types = entry.types.filter(
+      (type) =>
+        !clearedTypes.has(type) &&
+        !writtenTypes.has(type) &&
+        afterTypes.has(type) &&
+        !sameListLostAnotherType(before, writtenTypes, afterTypes, type),
+    );
+    if (types.length > 0) {
+      result.push({ ...entry, types });
+    }
+  }
+  return result;
+}
+
+/** Unconfirmed types that are no longer on the camera. They belong to the user. */
+export function clearedUnconfirmedTypes(
+  pending: SmartDetectEnforcedType[],
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  return pending
+    .map((entry) => ({
+      ...entry,
+      types: entry.types.filter((type) => !typesForPlace(after, entry).includes(type)),
+    }))
+    .filter((entry) => entry.types.length > 0);
+}
+
+/**
+ * Splits an unknown-ownership readback. Types already marked unconfirmed are
+ * settled when they survive again. New ones are marked. Types that cleared are
+ * dropped from the mark and kept in the snapshot.
+ */
+export function partitionUnconfirmedTypes(
+  previous: SmartDetectConfig | null,
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+  pending: SmartDetectEnforcedType[],
+  enforcing: SmartDetectEnforcedType[],
+): { settle: SmartDetectEnforcedType[]; mark: SmartDetectEnforcedType[]; clear: SmartDetectEnforcedType[] } {
+  const suspects = unconfirmedSurvivorTypes(beforeWrite, written, after);
+  const settle = overlappingEnforcedTypes(pending, suspects);
+  const mark = suspects
+    .map((entry) => ({
+      ...entry,
+      types: entry.types.filter((type) => {
+        if (enforcedEntryHas(enforcing, entry, type) || enforcedEntryHas(pending, entry, type)) {
+          return false;
+        }
+        // A snapshot that does not contain the type is proof enough to record it now.
+        return !previous || typesForPlace(previous, entry).includes(type);
+      }),
+    }))
+    .filter((entry) => entry.types.length > 0);
+  return {
+    settle,
+    mark,
+    clear: clearedUnconfirmedTypes(pending, after),
+  };
+}
+
+function enforcedEntryHas(entries: SmartDetectEnforcedType[], entry: SmartDetectEnforcedType, type: string): boolean {
+  const match = entries.find((item) => sameEnforcedPlace(item, entry));
+  return match?.types.includes(type) ?? false;
+}
+
+function overlappingEnforcedTypes(
+  left: SmartDetectEnforcedType[],
+  right: SmartDetectEnforcedType[],
+): SmartDetectEnforcedType[] {
+  const result: SmartDetectEnforcedType[] = [];
+  for (const entry of left) {
+    const match = right.find((item) => sameEnforcedPlace(item, entry));
+    if (!match) {
+      continue;
+    }
+    const kept = new Set(match.types);
+    const types = entry.types.filter((type) => kept.has(type));
+    if (types.length > 0) {
+      result.push({ ...entry, types });
+    }
+  }
+  return result;
 }
 
 /** Types a readback shows the controller forced, using the saved snapshot when there is one. */
