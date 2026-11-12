@@ -13,6 +13,10 @@ const LIST_KEYS = ['objectTypes', 'audioTypes', 'autoTrackingObjectTypes'] as co
  * (a second-lens zone is one case). Those types are not part of the snapshot.
  * Off still succeeds when every saved type is gone. On still succeeds when
  * every saved type is back. The extra types are reported, not stored.
+ *
+ * A type that stays on an unchanged list, and that this clear did not drop
+ * from any other list, is controller-enforced and is removed from the snapshot.
+ * A clear that changes no list records nothing.
  */
 
 export interface SmartDetectZoneSnapshot {
@@ -139,8 +143,10 @@ export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig
 /**
  * Picks the config to keep so the Smart Detection switch can turn it back on.
  * An active camera read replaces the saved snapshot. A disabled read does not.
- * A live camera whose saved types are already gone, and whose only remaining
- * types sit on lists the snapshot left empty, does not replace the snapshot.
+ * A live camera that has dropped a saved zone type is half-off or controller-forced
+ * and does not replace the snapshot. A live camera whose saved types are already
+ * gone, and whose only remaining types sit on lists the snapshot left empty, does
+ * not replace the snapshot either.
  * Settings lists that were already cleared (1.0.11 only cleared those) are kept
  * from the saved snapshot when the live zones are still the user's zones.
  */
@@ -149,6 +155,9 @@ export function retainSmartDetectSnapshot(
   live: SmartDetectConfig | null,
 ): SmartDetectConfig | null {
   if (live && smartDetectConfigActive(live)) {
+    if (saved && smartDetectConfigActive(saved) && savedZoneTypesMissing(saved, live)) {
+      return cloneSmartDetectConfig(saved);
+    }
     if (saved && smartDetectConfigActive(saved) && liveHasOnlyUnsavedTypes(saved, live)) {
       return cloneSmartDetectConfig(saved);
     }
@@ -238,8 +247,9 @@ export function listSmartDetectEnforcedTypes(
 }
 
 /**
- * Switch position. With a saved snapshot, only that snapshot's types count.
- * Types the controller adds on its own do not turn the switch on.
+ * Switch position. On means every saved snapshot type is present.
+ * Types the controller adds on its own do not turn the switch on, and one
+ * forced type does not count as on while a saved type is missing.
  */
 export function smartDetectEffectivelyEnabled(
   live: SmartDetectConfig | null | undefined,
@@ -249,9 +259,67 @@ export function smartDetectEffectivelyEnabled(
     return false;
   }
   if (saved && smartDetectConfigActive(saved)) {
-    return smartDetectOwnedTypesRemain(saved, live);
+    return snapshotTypesPresent(saved, live);
   }
   return smartDetectConfigActive(live);
+}
+
+export interface ClearReadback {
+  /** True when every detection list still matches the pre-write camera. */
+  ignored: boolean;
+  /**
+   * Types left on a list that did not change, after some other list did.
+   * Empty when the write was ignored or every changed list actually cleared.
+   */
+  enforced: SmartDetectEnforcedType[];
+}
+
+/**
+ * One readback after a clear. A type left on a list that did not change is
+ * controller-enforced when this clear did not remove that type from any list.
+ * Nothing is recorded when the camera is unchanged.
+ */
+export function classifyClearReadback(before: SmartDetectConfig, after: SmartDetectConfig): ClearReadback {
+  const settings = compareSettings(before, after);
+  const zones = compareZones('zone', before.zones, after.zones);
+  const secondLens = compareZones('secondLensZone', before.secondLensZones, after.secondLensZones);
+  const parts = [settings, zones, secondLens];
+  if (!parts.some((part) => part.changed)) {
+    return { ignored: true, enforced: [] };
+  }
+  return { ignored: false, enforced: enforcedTypes(parts) };
+}
+
+/** Removes controller-enforced types so they are not saved as the user's types. */
+export function withoutEnforcedTypes(
+  config: SmartDetectConfig,
+  enforced: SmartDetectEnforcedType[],
+): SmartDetectConfig {
+  const next = cloneSmartDetectConfig(config);
+  if (enforced.length === 0) {
+    return next;
+  }
+  for (const entry of enforced) {
+    if (entry.list === 'objectTypes' || entry.list === 'audioTypes' || entry.list === 'autoTrackingObjectTypes') {
+      next[entry.list] = removeTypes(next[entry.list], entry.types);
+      continue;
+    }
+    const zones = entry.list === 'secondLensZone' ? next.secondLensZones : next.zones;
+    if (!zones) {
+      continue;
+    }
+    const index = zones.findIndex(
+      (zone) =>
+        (entry.zoneId !== null && zone.id === entry.zoneId) ||
+        (entry.zoneName !== null && entry.zoneName !== '' && zone.name === entry.zoneName),
+    );
+    const zone = index >= 0 ? zones[index] : undefined;
+    if (!zone) {
+      continue;
+    }
+    zones[index] = withObjectTypes(zone, removeTypes(zone.objectTypes, entry.types));
+  }
+  return next;
 }
 
 /**
@@ -401,6 +469,124 @@ export function sanitizeSmartDetectConfig(value: unknown): SmartDetectConfig | n
 
 function settingsCleared(config: SmartDetectConfig): boolean {
   return LIST_KEYS.every((key) => config[key].length === 0);
+}
+
+interface ListComparison {
+  changed: boolean;
+  /** Types removed from a list that changed. */
+  cleared: string[];
+  stuck: SmartDetectEnforcedType[];
+}
+
+function compareSettings(before: SmartDetectConfig, after: SmartDetectConfig): ListComparison {
+  const stuck: SmartDetectEnforcedType[] = [];
+  const cleared: string[] = [];
+  let changed = false;
+  for (const key of LIST_KEYS) {
+    if (sameStringList(before[key], after[key])) {
+      if (after[key].length > 0) {
+        stuck.push({ list: key, zoneId: null, zoneName: null, types: [...after[key]].sort() });
+      }
+    } else {
+      changed = true;
+      cleared.push(...removedTypes(before[key], after[key]));
+    }
+  }
+  return { changed, cleared, stuck };
+}
+
+function compareZones(
+  list: 'zone' | 'secondLensZone',
+  before: SmartDetectZoneSnapshot[] | null,
+  after: SmartDetectZoneSnapshot[] | null,
+): ListComparison {
+  if (before === null || after === null) {
+    return { changed: before !== after, cleared: [], stuck: [] };
+  }
+  const pairs = pairZones(before, after);
+  if (!pairs) {
+    return { changed: true, cleared: [], stuck: [] };
+  }
+  const stuck: SmartDetectEnforcedType[] = [];
+  const cleared: string[] = [];
+  let changed = false;
+  for (const pair of pairs) {
+    if (!sameStringList(pair.baseline.objectTypes, pair.actual.objectTypes)) {
+      changed = true;
+      cleared.push(...removedTypes(pair.baseline.objectTypes, pair.actual.objectTypes));
+      continue;
+    }
+    if (pair.actual.objectTypes.length === 0) {
+      continue;
+    }
+    stuck.push({
+      list,
+      zoneId: pair.actual.id,
+      zoneName: pair.actual.name || null,
+      types: [...pair.actual.objectTypes].sort(),
+    });
+  }
+  return { changed, cleared, stuck };
+}
+
+/**
+ * A type that disappeared from a list in this clear is a user type. It is not
+ * enforced when a different list still has it.
+ */
+function enforcedTypes(parts: ListComparison[]): SmartDetectEnforcedType[] {
+  const cleared = new Set(parts.flatMap((part) => part.cleared));
+  const enforced: SmartDetectEnforcedType[] = [];
+  for (const part of parts) {
+    for (const entry of part.stuck) {
+      const types = entry.types.filter((type) => !cleared.has(type));
+      if (types.length > 0) {
+        enforced.push({ ...entry, types });
+      }
+    }
+  }
+  return enforced;
+}
+
+function removedTypes(before: string[], after: string[]): string[] {
+  const remaining = new Set(after);
+  return before.filter((type) => !remaining.has(type));
+}
+
+function removeTypes(types: string[], drop: string[]): string[] {
+  const unwanted = new Set(drop);
+  return types.filter((type) => !unwanted.has(type));
+}
+
+/** True when a saved zone type is absent. Settings-only snapshots are not half-off. */
+function savedZoneTypesMissing(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
+  return !zoneTypesPresent(saved.zones, live.zones) || !zoneTypesPresent(saved.secondLensZones, live.secondLensZones);
+}
+
+function snapshotTypesPresent(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
+  if (saved.settingsPresent) {
+    for (const key of LIST_KEYS) {
+      if (!typesPresent(saved[key], live[key])) {
+        return false;
+      }
+    }
+  }
+  return zoneTypesPresent(saved.zones, live.zones) && zoneTypesPresent(saved.secondLensZones, live.secondLensZones);
+}
+
+function zoneTypesPresent(saved: SmartDetectZoneSnapshot[] | null, live: SmartDetectZoneSnapshot[] | null): boolean {
+  if (!saved) {
+    return true;
+  }
+  for (const zone of saved) {
+    if (zone.objectTypes.length === 0) {
+      continue;
+    }
+    const match = (live ?? []).find((candidate) => sameZoneIdentity(zone, candidate));
+    if (!match || !typesPresent(zone.objectTypes, match.objectTypes)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function listsEqual(left: SmartDetectPreferences | null, right: SmartDetectPreferences | null): boolean {

@@ -1013,7 +1013,7 @@ describe('smart detection snapshots', () => {
     expect(droppedHealth.controllers[0]?.cameras[0]?.smartDetectEnforcedTypes).toEqual([]);
   });
 
-  it('still rejects a second-lens type the snapshot itself saved', async () => {
+  it('drops a second-lens type the controller puts back after a clear', async () => {
     store = doorbellRecord(['package']);
     apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
       applyPatch(store, payload);
@@ -1027,8 +1027,145 @@ describe('smart detection snapshots', () => {
       false,
     );
 
-    expect(outcome.smartDetectResult).toBe('mismatch');
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    expect(outcome.smartDetectConfig?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(outcome.smartDetectConfig?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+  });
+});
+
+describe('controller-enforced detection types', () => {
+  const address = '192.0.2.1';
+  const camera = { id: 'cam-1', name: 'Test Camera' } as ProtectCamera;
+
+  function dualLens(mainTypes: string[], secondTypes: string[]): CameraStore {
+    const zone = (id: number, name: string, objectTypes: string[]): Record<string, unknown> => ({
+      id,
+      name,
+      points: [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+      ],
+      sensitivity: 50,
+      objectTypes: [...objectTypes],
+    });
+    return cameraRecord({
+      id: 'cam-1',
+      name: 'Test Camera',
+      host: '192.0.2.10',
+      smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
+      smartDetectZones: [zone(1, 'Main', mainTypes)],
+      secondLensSmartDetectZones: [zone(2, 'Lens 2', secondTypes)],
+    });
+  }
+
+  function readSaved(dir: string): {
+    cameras: Array<{
+      config: { zones: Array<{ objectTypes: string[] }>; secondLensZones: Array<{ objectTypes: string[] }> };
+    }>;
+  } {
+    return JSON.parse(readFileSync(join(dir, SMART_DETECT_SNAPSHOT_FILENAME), 'utf8')) as ReturnType<typeof readSaved>;
+  }
+
+  function openClient(dir: string): { client: ProtectClient; snapshots: SmartDetectSnapshotStore } {
+    const snapshots = new SmartDetectSnapshotStore(() => dir);
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: snapshots,
+      controllerAddress: address,
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    return { client, snapshots };
+  }
+
+  it('turns detection off when the controller refills a cleared second lens', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-enforced-'));
+    store = dualLens(['person', 'vehicle'], ['package']);
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      const zone = store.secondLensSmartDetectZones?.[0];
+      if (zone && Array.isArray(zone.objectTypes) && zone.objectTypes.length === 0) {
+        store.secondLensSmartDetectZones = [{ ...zone, objectTypes: ['package'] }];
+      }
+      return structuredClone(store);
+    });
+    const { client } = openClient(dir);
+
+    const outcome = await client.updateCameraSmartDetection(camera, false);
+
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    const saved = readSaved(dir);
+    expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual([]);
+    expect(JSON.stringify(saved)).not.toContain('package');
+  });
+
+  it('does not replace a saved snapshot with a half-off camera', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-half-'));
+    const { client, snapshots } = openClient(dir);
+    snapshots.remember(address, 'cam-1', 'Test Camera', readConfig(dualLens(['person', 'vehicle'], ['package'])));
+    store = dualLens([], ['package']);
+
+    const outcome = await client.updateCameraSmartDetection(camera, false);
+
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual([]);
+    const saved = readSaved(dir);
+    expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual(['package']);
+  });
+
+  it('writes the saved types when turning detection on from a half-off camera', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-restore-'));
+    const { client, snapshots } = openClient(dir);
+    snapshots.remember(address, 'cam-1', 'Test Camera', readConfig(dualLens(['person', 'vehicle'], [])));
+    store = dualLens([], ['package']);
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      const zone = store.secondLensSmartDetectZones?.[0];
+      if (zone && Array.isArray(zone.objectTypes) && zone.objectTypes.length === 0) {
+        store.secondLensSmartDetectZones = [{ ...zone, objectTypes: ['package'] }];
+      }
+      return structuredClone(store);
+    });
+
+    const outcome = await client.updateCameraSmartDetection(camera, true);
+
+    expect(outcome.smartDetectResult).toBe('ok');
+    expect(apiState.updateDevice).toHaveBeenCalled();
+    const payload = apiState.updateDevice.mock.calls[0]?.[1] as {
+      smartDetectZones?: Array<{ objectTypes: string[] }>;
+    };
+    expect(payload.smartDetectZones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    const saved = readSaved(dir);
+    expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual([]);
+    expect(JSON.stringify(saved)).not.toContain('package');
+  });
+
+  it('records nothing when the controller ignores the clear', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-ignored-'));
+    const { client, snapshots } = openClient(dir);
+    snapshots.remember(address, 'cam-1', 'Test Camera', readConfig(dualLens(['person', 'vehicle'], [])));
+    store = dualLens(['person', 'vehicle'], ['package']);
+    apiState.updateDevice = vi.fn(async () => structuredClone(store));
+
+    const outcome = await client.updateCameraSmartDetection(camera, false);
+
+    expect(outcome.smartDetectResult).toBe('mismatch');
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    const saved = readSaved(dir);
+    expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual([]);
+    expect(JSON.stringify(saved)).not.toContain('package');
   });
 });
 

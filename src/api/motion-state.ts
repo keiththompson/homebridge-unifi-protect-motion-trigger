@@ -1,10 +1,12 @@
 import type { SmartDetectConfig } from './smart-detect.js';
 import {
+  classifyClearReadback,
   preferencesFromConfig,
   readSmartDetectConfig,
   smartDetectConfigActive,
   smartDetectObligationMet,
   smartDetectStateMatches,
+  withoutEnforcedTypes,
 } from './smart-detect.js';
 import type { ProtectCamera, SmartDetectPreferences } from './types.js';
 
@@ -43,6 +45,8 @@ export interface MotionReadbackExpectation {
   smartDetectBaseline?: SmartDetectConfig | null;
   /** True when restoring the snapshot. False when clearing the snapshot's types. */
   smartDetectEnabling?: boolean;
+  /** Camera state before a clear. Used to tell a refilled list from an ignored write. */
+  smartDetectBefore?: SmartDetectConfig | null;
 }
 
 export function smartDetectListsEqual(left: SmartDetectPreferences, right: SmartDetectPreferences): boolean {
@@ -94,7 +98,19 @@ export function motionReadbackMatches(camera: ProtectCamera, expected: MotionRea
   if (expected.smartDetectConfig) {
     const live = readSmartDetectConfig(camera);
     if (expected.smartDetectBaseline) {
-      if (!smartDetectObligationMet(expected.smartDetectEnabling === true, expected.smartDetectBaseline, live)) {
+      const enabling = expected.smartDetectEnabling === true;
+      let accepted = smartDetectObligationMet(enabling, expected.smartDetectBaseline, live);
+      if (!accepted && !enabling && expected.smartDetectBefore) {
+        const classified = classifyClearReadback(expected.smartDetectBefore, live);
+        if (!classified.ignored && classified.enforced.length > 0) {
+          accepted = smartDetectObligationMet(
+            false,
+            withoutEnforcedTypes(expected.smartDetectBaseline, classified.enforced),
+            live,
+          );
+        }
+      }
+      if (!accepted) {
         return false;
       }
     } else if (!smartDetectStateMatches(expected.smartDetectConfig, live)) {
