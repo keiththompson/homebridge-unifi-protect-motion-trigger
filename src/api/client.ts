@@ -684,12 +684,15 @@ export class ProtectClient {
     );
     const follow: CameraWritePayload = {};
     applySmartPatch(follow, patchForResidualLists(plan.patch, stuck));
+    let reClearVerified = true;
     if (payloadHasSmartDetect(follow)) {
+      reClearVerified = false;
       const wrote = await this.writeDevice(camera, follow, budget);
       if (wrote.ok) {
         const again = await this.fetchCameraRecord(camera, budget);
         if (again) {
           current = again;
+          reClearVerified = true;
         }
       }
     }
@@ -706,9 +709,10 @@ export class ProtectClient {
     if (decision.clear.length > 0) {
       this.dropUnconfirmedTypes(camera, decision.clear);
     }
-    const confirmed = novelResidualTypes([...added, ...decision.settle], this.enforcedTypes(camera));
-    if (decision.settle.length > 0) {
-      this.dropUnconfirmedTypes(camera, decision.settle);
+    const settle = reClearVerified ? decision.settle : [];
+    const confirmed = novelResidualTypes([...added, ...settle], this.enforcedTypes(camera));
+    if (settle.length > 0) {
+      this.dropUnconfirmedTypes(camera, settle);
     }
     if (confirmed.length === 0) {
       return { camera: current, config: null, dropped: false };
