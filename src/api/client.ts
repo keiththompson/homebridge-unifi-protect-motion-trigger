@@ -32,10 +32,12 @@ import {
   smartDetectConfigsEqual,
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
+  smartDetectPatch,
   type SmartDetectWritePlan,
   typesStillOwned,
   withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
+  withRestoredTypes,
 } from './smart-detect.js';
 import type {
   LedSettings,
@@ -531,8 +533,22 @@ export class ProtectClient {
           }
         }
       }
+      let restoredTypes: SmartDetectEnforcedType[] = [];
       if (observed) {
-        this.dropAbsentEnforcedTypes(camera, readSmartDetectConfig(observed));
+        restoredTypes = this.restoreAbsentEnforcedTypes(camera, readSmartDetectConfig(observed));
+      }
+      if (observed && settings.smartDetect === true && restoredTypes.length > 0 && config) {
+        config = withRestoredTypes(config, restoredTypes);
+        if (expected.smartDetectBaseline) {
+          expected.smartDetectBaseline = withRestoredTypes(expected.smartDetectBaseline, restoredTypes);
+        }
+        if (expected.smartDetectConfig) {
+          expected.smartDetectConfig = withRestoredTypes(expected.smartDetectConfig, restoredTypes);
+        }
+        const wroteBack = await this.writeRestoredTypes(camera, config, budget);
+        if (wroteBack) {
+          observed = wroteBack;
+        }
       }
       if (observed) {
         this.snapshots.set(camera.id, snapshotFromCamera(observed, this.now(), readback.attempts));
@@ -570,6 +586,9 @@ export class ProtectClient {
             if (smartDetectConfigActive(cleaned)) {
               this.persistSmartDetectSnapshot(camera, cleaned);
             }
+          }
+          if (restoredTypes.length > 0 && config) {
+            this.persistSmartDetectSnapshot(camera, config);
           }
           this.log.info(this.confirmedReadbackMessage(camera, changes, config, observed, droppedRefill));
         }
@@ -711,16 +730,44 @@ export class ProtectClient {
     return { camera: current, config: stripped, dropped: true };
   }
 
-  private dropAbsentEnforcedTypes(camera: ProtectCamera, actual: SmartDetectConfig): void {
+  /**
+   * A recorded type that a readback no longer shows was not enforced. Drop the
+   * record and put the type back into the snapshot so the next on can write it.
+   */
+  private restoreAbsentEnforcedTypes(camera: ProtectCamera, actual: SmartDetectConfig): SmartDetectEnforcedType[] {
     const absent = enforcedTypesAbsent(this.enforcedTypes(camera), actual);
     if (absent.length === 0 || !this.smartDetectStore || !this.controllerAddress) {
-      return;
+      return [];
     }
     try {
       this.smartDetectStore.dropEnforced(this.controllerAddress, camera.id, absent);
+      const saved = this.smartDetectStore.get(this.controllerAddress, camera.id);
+      if (saved) {
+        this.persistSmartDetectSnapshot(camera, withRestoredTypes(saved, absent));
+      }
     } catch (error) {
       this.log.error(`Could not update enforced smart detection types for ${camera.name}: ${errorText(error)}`);
+      return [];
     }
+    return absent;
+  }
+
+  /** One follow-up write of a type that turned out not to be enforced. */
+  private async writeRestoredTypes(
+    camera: ProtectCamera,
+    config: SmartDetectConfig,
+    budget: SessionRecoveryBudget,
+  ): Promise<ProtectCamera | null> {
+    const payload: CameraWritePayload = {};
+    applySmartPatch(payload, smartDetectPatch(config, 'restore'));
+    if (!payloadHasSmartDetect(payload)) {
+      return null;
+    }
+    const wrote = await this.writeDevice(camera, payload, budget);
+    if (!wrote.ok) {
+      return null;
+    }
+    return this.fetchCameraRecord(camera, budget);
   }
 
   private persistUnconfirmedTypes(camera: ProtectCamera, unconfirmed: SmartDetectEnforcedType[]): void {

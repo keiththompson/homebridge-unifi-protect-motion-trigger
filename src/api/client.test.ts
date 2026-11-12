@@ -2002,4 +2002,57 @@ describe('user-owned types are not recorded when a write does not apply', () => 
     expect(store.smartDetectZones?.[1]?.objectTypes).toEqual(['vehicle']);
     expect(rig.snapshotStore.getEnforced(address, 'yardcam')).toEqual([]);
   });
+
+  it('writes a second-lens type back when a recorded type later clears', async () => {
+    const rig = setup(doorbellRecord(['animal']), (write, before) => {
+      if (write <= 5 && before.secondLensSmartDetectZones) {
+        store.secondLensSmartDetectZones = before.secondLensSmartDetectZones;
+      }
+    });
+    rig.snapshotStore.remember(
+      address,
+      'doorbell',
+      'Entrance Doorbell',
+      readSmartDetectConfig(doorbellRecord(['animal']) as unknown as ProtectCamera),
+    );
+
+    const off = await rig.client.updateCameraSmartDetection(rig.cam, false);
+    await rig.client.updateCameraSmartDetection(rig.cam, true);
+    const settled = await rig.client.updateCameraSmartDetection(rig.cam, false);
+    const recovered = await rig.client.updateCameraSmartDetection(rig.cam, true);
+
+    expect(off.smartDetectResult).not.toBe('ok');
+    expect(settled.smartDetectResult).toBe('ok');
+    expect(recovered.smartDetectResult).toBe('ok');
+    expect(rig.snapshotStore.get(address, 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual(['animal']);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['animal']);
+    expect(rig.snapshotStore.getEnforced(address, 'doorbell')).toEqual([]);
+  });
+
+  it('writes an audio type back when a recorded type later clears', async () => {
+    const gate = cameraRecord({
+      id: 'gate',
+      name: 'Gate',
+      smartDetectSettings: { objectTypes: ['person'], audioTypes: ['alrmSmoke'], autoTrackingObjectTypes: [] },
+      smartDetectZones: [
+        { id: 1, name: 'Gate', color: '#111111', points: porch, sensitivity: 50, objectTypes: ['person'] },
+      ],
+    });
+    const rig = setup(gate, (write, before) => {
+      if (write <= 5) {
+        store.smartDetectSettings = { ...store.smartDetectSettings, audioTypes: before.smartDetectSettings.audioTypes };
+      }
+    });
+
+    await rig.client.updateCameraSmartDetection(rig.cam, false);
+    await rig.client.updateCameraSmartDetection(rig.cam, true);
+    const settled = await rig.client.updateCameraSmartDetection(rig.cam, false);
+    const recovered = await rig.client.updateCameraSmartDetection(rig.cam, true);
+
+    expect(settled.smartDetectResult).toBe('ok');
+    expect(recovered.smartDetectResult).toBe('ok');
+    expect(rig.snapshotStore.get(address, 'gate')?.audioTypes).toEqual(['alrmSmoke']);
+    expect(store.smartDetectSettings.audioTypes).toEqual(['alrmSmoke']);
+    expect(rig.snapshotStore.getEnforced(address, 'gate')).toEqual([]);
+  });
 });

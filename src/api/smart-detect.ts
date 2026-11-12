@@ -649,6 +649,30 @@ function withoutKnownEnforced(
   return stripped;
 }
 
+/** Puts types back onto the lists they were removed from. Zone identity matches the rest of the plugin. */
+export function withRestoredTypes(baseline: SmartDetectConfig, restored: SmartDetectEnforcedType[]): SmartDetectConfig {
+  const next = cloneSmartDetectConfig(baseline);
+  for (const entry of restored) {
+    if (entry.list === 'objectTypes' || entry.list === 'audioTypes' || entry.list === 'autoTrackingObjectTypes') {
+      const present = new Set(next[entry.list]);
+      next[entry.list] = [...next[entry.list], ...entry.types.filter((type) => !present.has(type))];
+      continue;
+    }
+    const zones = entry.list === 'secondLensZone' ? next.secondLensZones : next.zones;
+    if (!zones) {
+      continue;
+    }
+    const index = zones.findIndex((zone) => zoneMatchesEntry(zone, entry));
+    const zone = index >= 0 ? zones[index] : undefined;
+    if (!zone) {
+      continue;
+    }
+    const present = new Set(zone.objectTypes);
+    zones[index] = withObjectTypes(zone, [...zone.objectTypes, ...entry.types.filter((type) => !present.has(type))]);
+  }
+  return next;
+}
+
 /** Snapshot with the refilled types removed, so the next off does not try to clear them. */
 export function withoutRefilledTypes(
   baseline: SmartDetectConfig,
