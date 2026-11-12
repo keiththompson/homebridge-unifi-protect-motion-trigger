@@ -1235,42 +1235,66 @@ describe('smart detection snapshots', () => {
 });
 
 describe('doorbell package already present while on', () => {
-  for (const variant of ['healthy-snapshot', 'no-snapshot'] as const) {
-    it(`records package and stays ok across on and off from ${variant}`, async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-live-'));
-      const snapshotStore = new SmartDetectSnapshotStore(() => dir);
-      if (variant === 'healthy-snapshot') {
-        snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(doorbellRecord([])));
-      }
-      store = doorbellRecord(['package']);
-      apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
-        applyPatch(store, payload);
-        refillEmptySecondLens(store);
-        return structuredClone(store);
-      });
-      apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
-      const client = new ProtectClient(createMockLogger(), {
-        sleep: async () => undefined,
-        smartDetectStore: snapshotStore,
-        controllerAddress: '10.0.0.5',
-      });
-      (client as unknown as { connected: boolean }).connected = true;
-      const cam = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
-
-      const results = [];
-      for (const enabled of [false, true, false, true, false]) {
-        const outcome = await client.updateCameraSmartDetection(cam, enabled);
-        results.push(outcome.smartDetectResult);
-      }
-
-      expect(results).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
-      expect(snapshotStore.get('10.0.0.5', 'doorbell')?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
-      expect(snapshotStore.get('10.0.0.5', 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual([]);
-      expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
-        { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
-      ]);
+  it('records package and stays ok across on and off from a healthy snapshot', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-live-'));
+    const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+    snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(doorbellRecord([])));
+    store = doorbellRecord(['package']);
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      refillEmptySecondLens(store);
+      return structuredClone(store);
     });
-  }
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: snapshotStore,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+    const cam = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
+
+    const results = [];
+    for (const enabled of [false, true, false, true, false]) {
+      const outcome = await client.updateCameraSmartDetection(cam, enabled);
+      results.push(outcome.smartDetectResult);
+    }
+
+    expect(results).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
+    expect(snapshotStore.get('10.0.0.5', 'doorbell')?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(snapshotStore.get('10.0.0.5', 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+  });
+
+  it('does not record package on the first off when there is no snapshot', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-first-'));
+    const snapshotStore = new SmartDetectSnapshotStore(() => dir);
+    store = doorbellRecord(['package']);
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      refillEmptySecondLens(store);
+      return structuredClone(store);
+    });
+    apiState.retrieve = vi.fn(async () => jsonResponse(structuredClone(store)));
+    const client = new ProtectClient(createMockLogger(), {
+      sleep: async () => undefined,
+      smartDetectStore: snapshotStore,
+      controllerAddress: '10.0.0.5',
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const off = await client.updateCameraSmartDetection(
+      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
+      false,
+    );
+
+    expect(off.smartDetectResult).not.toBe('ok');
+    expect(snapshotStore.getEnforced('10.0.0.5', 'doorbell')).toEqual([]);
+    expect(snapshotStore.get('10.0.0.5', 'doorbell')?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(snapshotStore.get('10.0.0.5', 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+  });
 });
 
 describe('partial clears are not enforcement', () => {
@@ -1836,6 +1860,31 @@ describe('user-owned types are not recorded when a write does not apply', () => 
 
     expect(rig.snapshotStore.get(address, 'doorbell')?.secondLensZones?.[0]?.objectTypes).toEqual(['animal']);
     expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['animal']);
+  });
+
+  it('does not record an audio type on the first off when that field never clears', async () => {
+    const gate = cameraRecord({
+      id: 'gate',
+      name: 'Gate',
+      smartDetectSettings: { objectTypes: ['person'], audioTypes: ['alrmSmoke'], autoTrackingObjectTypes: [] },
+      smartDetectZones: [
+        { id: 1, name: 'Gate', color: '#111111', points: porch, sensitivity: 50, objectTypes: ['person'] },
+      ],
+    });
+    const rig = setup(gate, (write, before) => {
+      if (write <= 2) {
+        store.smartDetectSettings = { ...store.smartDetectSettings, audioTypes: before.smartDetectSettings.audioTypes };
+      }
+    });
+
+    const off = await rig.client.updateCameraSmartDetection(rig.cam, false);
+    const on = await rig.client.updateCameraSmartDetection(rig.cam, true);
+
+    expect(off.smartDetectResult).not.toBe('ok');
+    expect(on.smartDetectResult).toBe('ok');
+    expect(rig.snapshotStore.get(address, 'gate')?.audioTypes).toEqual(['alrmSmoke']);
+    expect(rig.snapshotStore.getEnforced(address, 'gate')).toEqual([]);
+    expect(store.smartDetectSettings.audioTypes).toEqual(['alrmSmoke']);
   });
 
   it('keeps a saved audio type when that field ignores two clears', async () => {

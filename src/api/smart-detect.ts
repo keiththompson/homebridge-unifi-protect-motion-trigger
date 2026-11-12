@@ -299,7 +299,8 @@ export function addedByController(
  * so an ignored write does not qualify. A zone that sticks while a sibling
  * zone in the same list clears is a partial apply, not enforcement. A type the
  * snapshot already stored is the user's, even when the write to that list did
- * not apply.
+ * not apply. With no snapshot, a type already on the camera is recorded only
+ * when that list lost a different type and another list in the same patch changed.
  */
 export function survivingUnownedTypes(
   previous: SmartDetectConfig | null,
@@ -322,13 +323,59 @@ export function survivingUnownedTypes(
       if (clearedTypes.has(type)) {
         return false;
       }
-      return !previous || !typesForPlace(previous, entry).includes(type);
+      if (previous) {
+        return !typesForPlace(previous, entry).includes(type);
+      }
+      // No saved snapshot yet. A type that was already on the camera is not
+      // evidence: an ignored write leaves it there too. Record it only when
+      // this list lost a different type, so the clear applied and this one
+      // came back, and some other list in the same patch changed.
+      return firstOffTypeReappeared(entry, type, beforeWrite, written, after, cleared);
     });
     if (types.length > 0) {
       result.push({ ...entry, types });
     }
   }
   return result;
+}
+
+function firstOffTypeReappeared(
+  entry: SmartDetectEnforcedType,
+  type: string,
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+  cleared: SmartDetectEnforcedType[],
+): boolean {
+  if (!cleared.some((item) => !sameEnforcedPlace(item, entry))) {
+    return false;
+  }
+  const writtenTypes = new Set(typesForPlace(written, entry));
+  if (writtenTypes.has(type)) {
+    return false;
+  }
+  const before = typesForPlace(beforeWrite, entry);
+  const afterTypes = new Set(typesForPlace(after, entry));
+  if (!afterTypes.has(type)) {
+    return false;
+  }
+  return before.some((other) => other !== type && !writtenTypes.has(other) && !afterTypes.has(other));
+}
+
+/** Types a readback shows the controller forced, using the saved snapshot when there is one. */
+export function readbackEnforcedTypes(
+  previous: SmartDetectConfig | null,
+  beforeWrite: SmartDetectConfig,
+  written: SmartDetectConfig,
+  after: SmartDetectConfig,
+): SmartDetectEnforcedType[] {
+  const appeared = addedByController(beforeWrite, written, after);
+  const survived = survivingUnownedTypes(previous, beforeWrite, written, after);
+  if (previous) {
+    return [...appeared, ...survived];
+  }
+  const cleared = typesThatCleared(beforeWrite, written, after);
+  return [...appeared.filter((entry) => cleared.some((item) => !sameEnforcedPlace(item, entry))), ...survived];
 }
 
 function typesThatCleared(

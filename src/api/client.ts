@@ -17,7 +17,6 @@ import {
   readMotionDiagnostics,
 } from './motion-state.js';
 import {
-  addedByController,
   enforcedTypesAbsent,
   listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
@@ -25,6 +24,7 @@ import {
   patchForResidualLists,
   planSmartDetectWrite,
   preferencesFromConfig,
+  readbackEnforcedTypes,
   readSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectConfigActive,
@@ -32,7 +32,6 @@ import {
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
-  survivingUnownedTypes,
   typesStillOwned,
   withoutRefilledTypes,
   withoutUnsavedSmartDetectTypes,
@@ -669,10 +668,7 @@ export class ProtectClient {
     }
     const after = readSmartDetectConfig(current);
     const added = novelResidualTypes(
-      [
-        ...addedByController(beforeWrite, written, after),
-        ...survivingUnownedTypes(previous, beforeWrite, written, after),
-      ],
+      readbackEnforcedTypes(previous, beforeWrite, written, after),
       this.enforcedTypes(camera),
     );
     if (added.length === 0) {
