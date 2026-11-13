@@ -110,6 +110,10 @@ export function motionReadbackMatches(camera: ProtectCamera, expected: MotionRea
           );
         }
       }
+      if (accepted && expected.smartDetectEnabling !== true) {
+        const present = new Set(live.objectTypes);
+        accepted = expected.smartDetectConfig.objectTypes.every((type) => present.has(type));
+      }
       if (!accepted) {
         return false;
       }

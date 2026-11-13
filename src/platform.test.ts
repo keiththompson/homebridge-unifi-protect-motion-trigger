@@ -248,7 +248,7 @@ describe('ProtectMotionPlatform health', () => {
     expect(health.controllers[0]?.cameras[0]).toMatchObject({
       smartDetectDrift: false,
       drift: false,
-      smartDetectEnforcedTypes: [{ list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] }],
+      smartDetectEnforcedTypes: [],
       readback: { status: 'verified' },
     });
     const saved = JSON.parse(readFileSync(join(dir, SMART_DETECT_SNAPSHOT_FILENAME), 'utf8')) as {

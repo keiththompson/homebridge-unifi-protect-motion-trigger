@@ -8,16 +8,16 @@ const LIST_KEYS = ['objectTypes', 'audioTypes', 'autoTrackingObjectTypes'] as co
  * `objectTypes` is non-empty. Turning it off clears those lists and leaves
  * every other zone field (name, points, sensitivity, color, id) untouched.
  * Restore writes the snapshotted objects back. Nothing here is a default zone.
+ * Second-lens zones are never written. Off keeps camera-level object types that
+ * a second-lens zone uses, and writes a missing one back. Drift ignores that lens.
  *
- * A controller may put types back on a list this plugin saved as empty
- * (a second-lens zone is one case). Those types are not part of the snapshot.
+ * A controller may put types back on a list this plugin saved as empty.
  * Off still succeeds when every saved type is gone. On still succeeds when
  * every saved type is back. The extra types are reported, not stored.
  *
  * A type that stays on an unchanged list, and that this clear did not drop
  * from another zone, is controller-enforced and is removed from the snapshot.
- * Clearing the camera-level object list does not stop a second-lens copy of
- * that type from being enforced. A clear that changes no list records nothing.
+ * A clear that changes no list records nothing.
  */
 
 export interface SmartDetectZoneSnapshot {
@@ -111,10 +111,14 @@ export function smartDetectConfigActive(config: SmartDetectConfig | null | undef
   if (!config) {
     return false;
   }
-  if (LIST_KEYS.some((key) => config[key].length > 0)) {
+  if (config.audioTypes.length > 0 || config.autoTrackingObjectTypes.length > 0) {
     return true;
   }
-  return zoneLists(config).some((zone) => zone.objectTypes.length > 0);
+  if ((config.zones ?? []).some((zone) => zone.objectTypes.length > 0)) {
+    return true;
+  }
+  const secondLens = new Set(secondLensObjectTypes(config));
+  return config.objectTypes.some((type) => !secondLens.has(type));
 }
 
 export function cloneSmartDetectConfig(config: SmartDetectConfig): SmartDetectConfig {
@@ -128,16 +132,15 @@ export function cloneSmartDetectConfig(config: SmartDetectConfig): SmartDetectCo
   };
 }
 
-/** Same geometry and settings, with every detection list cleared. */
+/** Clears managed lists. Second-lens zones are copied, not cleared. */
 export function disableSmartDetect(config: SmartDetectConfig): SmartDetectConfig {
   return {
-    objectTypes: [],
+    objectTypes: objectTypesKeptForSecondLens(config),
     audioTypes: [],
     autoTrackingObjectTypes: [],
     settingsPresent: config.settingsPresent,
     zones: config.zones === null ? null : config.zones.map((zone) => withClearedTypes(zone)),
-    secondLensZones:
-      config.secondLensZones === null ? null : config.secondLensZones.map((zone) => withClearedTypes(zone)),
+    secondLensZones: cloneZones(config.secondLensZones),
   };
 }
 
@@ -188,10 +191,7 @@ export function retainSmartDetectSnapshot(
   return null;
 }
 
-/**
- * Readback comparison. Zone arrays are asserted only when the expected config
- * has them; a settings-only snapshot must not fail because the camera also has zones.
- */
+/** Readback comparison. Second-lens zones are not compared. */
 export function smartDetectStateMatches(expected: SmartDetectConfig, actual: SmartDetectConfig): boolean {
   if (expected.settingsPresent) {
     const expectedLists = preferencesFromConfig(expected);
@@ -203,17 +203,12 @@ export function smartDetectStateMatches(expected: SmartDetectConfig, actual: Sma
   if (expected.zones !== null && !zonesEqual(expected.zones, actual.zones)) {
     return false;
   }
-  if (expected.secondLensZones !== null && !zonesEqual(expected.secondLensZones, actual.secondLensZones)) {
-    return false;
-  }
   return true;
 }
 
 /**
- * True when the plugin's saved types are in the state the switch asked for.
- * Off: every saved type is absent. On: every saved type is present, and a list
- * that already had saved types did not gain more. Types on a list the snapshot
- * left empty are ignored here; {@link listSmartDetectEnforcedTypes} reports them.
+ * Saved managed types match the switch. Second-lens zones are ignored.
+ * Camera-level object types a second-lens zone uses are not drift.
  */
 export function smartDetectObligationMet(
   enabled: boolean,
@@ -223,35 +218,33 @@ export function smartDetectObligationMet(
   if (!settingsObligationMet(enabled, baseline, actual)) {
     return false;
   }
-  if (!zonesObligationMet(enabled, baseline.zones, actual.zones)) {
-    return false;
-  }
-  return zonesObligationMet(enabled, baseline.secondLensZones, actual.secondLensZones);
+  return zonesObligationMet(enabled, baseline.zones, actual.zones);
 }
 
-/** Types on `actual` that `baseline` does not contain, for lists whose zones still line up. */
+/** Extras on managed lists. Second-lens zones and their camera-level types are omitted. */
 export function listSmartDetectEnforcedTypes(
   baseline: SmartDetectConfig,
   actual: SmartDetectConfig,
 ): SmartDetectEnforcedType[] {
   const enforced: SmartDetectEnforcedType[] = [];
+  const secondLens = new Set(secondLensObjectTypes(actual));
   if (baseline.settingsPresent) {
     for (const key of LIST_KEYS) {
-      const types = extraTypes(baseline[key], actual[key]);
+      const types = extraTypes(baseline[key], actual[key]).filter(
+        (type) => key !== 'objectTypes' || !secondLens.has(type),
+      );
       if (types.length > 0) {
         enforced.push({ list: key, zoneId: null, zoneName: null, types });
       }
     }
   }
   appendZoneExtras(enforced, 'zone', baseline.zones, actual.zones);
-  appendZoneExtras(enforced, 'secondLensZone', baseline.secondLensZones, actual.secondLensZones);
   return enforced;
 }
 
 /**
- * Switch position. With a saved snapshot, the switch stays on while any saved
- * type remains, unless a saved zone or lens has lost every one of its types.
- * Types the controller adds on its own do not turn the switch on.
+ * Switch position. Second-lens zones and the camera-level types they use do not
+ * turn it on. A saved main-lens zone that lost every type turns it off.
  */
 export function smartDetectEffectivelyEnabled(
   live: SmartDetectConfig | null | undefined,
@@ -276,21 +269,22 @@ export interface ClearReadback {
   enforced: SmartDetectEnforcedType[];
 }
 
-/**
- * One readback after a clear. A type left on a list that did not change is
- * controller-enforced when this clear did not remove that type from a zone.
- * A camera-level clear is not that signal for a second lens. Nothing is
- * recorded when the camera is unchanged.
- */
+/** Readback after a clear. Second-lens zones are ignored. An unchanged camera records nothing. */
 export function classifyClearReadback(before: SmartDetectConfig, after: SmartDetectConfig): ClearReadback {
   const settings = compareSettings(before, after);
   const zones = compareZones('zone', before.zones, after.zones);
-  const secondLens = compareZones('secondLensZone', before.secondLensZones, after.secondLensZones);
-  const parts = [settings, zones, secondLens];
-  if (!parts.some((part) => part.changed)) {
+  if (!settings.changed && !zones.changed) {
     return { ignored: true, enforced: [] };
   }
-  return { ignored: false, enforced: enforcedTypes(settings, zones, secondLens) };
+  const secondLens = new Set(secondLensObjectTypes(after));
+  const enforced = enforcedTypes(settings, zones).flatMap((entry) => {
+    if (entry.list !== 'objectTypes') {
+      return [entry];
+    }
+    const types = entry.types.filter((type) => !secondLens.has(type));
+    return types.length > 0 ? [{ ...entry, types }] : [];
+  });
+  return { ignored: false, enforced };
 }
 
 /** Removes controller-enforced types so they are not saved as the user's types. */
@@ -346,7 +340,7 @@ export function withoutUnsavedSmartDetectTypes(
     next.settingsPresent = true;
   }
   next.zones = restrictZoneTypes(actual.zones, baseline.zones);
-  next.secondLensZones = restrictZoneTypes(actual.secondLensZones, baseline.secondLensZones);
+  next.secondLensZones = cloneZones(baseline.secondLensZones);
   return next;
 }
 
@@ -372,9 +366,6 @@ export function smartDetectPatch(config: SmartDetectConfig, mode: 'restore' | 'd
   }
   if (source.zones !== null) {
     patch.smartDetectZones = source.zones.map((zone) => zonePayload(zone));
-  }
-  if (source.secondLensZones !== null) {
-    patch.secondLensSmartDetectZones = source.secondLensZones.map((zone) => zonePayload(zone));
   }
   return patch;
 }
@@ -406,28 +397,14 @@ export function planSmartDetectWrite(
     if (!live || !hasSmartDetectRecord(live)) {
       return { patch: {}, config: snapshot, expectedConfig: null, nothingToRestore: false };
     }
-    // Saved types are already gone. Another clear would only poke lists the
-    // controller refills, and the readback would never match an empty list.
-    if (snapshot && liveHasOnlyUnsavedTypes(snapshot, live)) {
-      return {
-        patch: {},
-        config: snapshot,
-        expectedConfig: disableSmartDetect(snapshot),
-        nothingToRestore: false,
-      };
-    }
-    if (!smartDetectConfigActive(live)) {
-      return {
-        patch: {},
-        config: snapshot,
-        expectedConfig: disableSmartDetect(live),
-        nothingToRestore: false,
-      };
+    const expected = disableSmartDetect(live);
+    if (smartDetectConfigsEqual(expected, live)) {
+      return { patch: {}, config: snapshot, expectedConfig: expected, nothingToRestore: false };
     }
     return {
       patch: smartDetectPatch(live, 'disable'),
       config: snapshot,
-      expectedConfig: disableSmartDetect(live),
+      expectedConfig: expected,
       nothingToRestore: false,
     };
   }
@@ -537,27 +514,14 @@ function compareZones(
   return { changed, cleared, stuck };
 }
 
-/**
- * A type removed from a zone in this clear is a user type. It is not enforced
- * when a different list still has it. Removing it from the camera-level object
- * list is not that signal for a second lens: the controller can put the type
- * back on that lens after the aggregate list has dropped it.
- */
-function enforcedTypes(
-  settings: ListComparison,
-  zones: ListComparison,
-  secondLens: ListComparison,
-): SmartDetectEnforcedType[] {
-  const clearedAnywhere = new Set([settings, zones, secondLens].flatMap((part) => part.cleared));
-  const clearedOnAZone = new Set([...zones.cleared, ...secondLens.cleared]);
+/** A type removed from a managed list in this clear is a user type, not enforced. */
+function enforcedTypes(settings: ListComparison, zones: ListComparison): SmartDetectEnforcedType[] {
+  const cleared = new Set([...settings.cleared, ...zones.cleared]);
   const enforced: SmartDetectEnforcedType[] = [];
-  for (const part of [settings, zones, secondLens]) {
-    for (const entry of part.stuck) {
-      const cleared = entry.list === 'secondLensZone' ? clearedOnAZone : clearedAnywhere;
-      const types = entry.types.filter((type) => !cleared.has(type));
-      if (types.length > 0) {
-        enforced.push({ ...entry, types });
-      }
+  for (const entry of [...settings.stuck, ...zones.stuck]) {
+    const types = entry.types.filter((type) => !cleared.has(type));
+    if (types.length > 0) {
+      enforced.push({ ...entry, types });
     }
   }
   return enforced;
@@ -573,9 +537,9 @@ function removeTypes(types: string[], drop: string[]): string[] {
   return types.filter((type) => !unwanted.has(type));
 }
 
-/** True when a saved zone or lens has lost every one of its saved types. */
+/** True when a saved main-lens zone has lost every one of its saved types. */
 function savedZoneTypesMissing(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
-  return savedZoneEmptied(saved.zones, live.zones) || savedZoneEmptied(saved.secondLensZones, live.secondLensZones);
+  return savedZoneEmptied(saved.zones, live.zones);
 }
 
 function snapshotTypesPresent(saved: SmartDetectConfig, live: SmartDetectConfig): boolean {
@@ -767,8 +731,33 @@ function cloneZones(zones: SmartDetectZoneSnapshot[] | null): SmartDetectZoneSna
   }));
 }
 
-function zoneLists(config: SmartDetectConfig): SmartDetectZoneSnapshot[] {
-  return [...(config.zones ?? []), ...(config.secondLensZones ?? [])];
+function secondLensObjectTypes(config: SmartDetectConfig): string[] {
+  const types: string[] = [];
+  const seen = new Set<string>();
+  for (const zone of config.secondLensZones ?? []) {
+    for (const type of zone.objectTypes) {
+      if (seen.has(type)) {
+        continue;
+      }
+      seen.add(type);
+      types.push(type);
+    }
+  }
+  return types;
+}
+
+/** Drops object types no second-lens zone uses, and appends any that list is missing. */
+function objectTypesKeptForSecondLens(config: SmartDetectConfig): string[] {
+  const needed = secondLensObjectTypes(config);
+  const neededSet = new Set(needed);
+  const kept = config.objectTypes.filter((type) => neededSet.has(type));
+  const have = new Set(kept);
+  for (const type of needed) {
+    if (!have.has(type)) {
+      kept.push(type);
+    }
+  }
+  return kept;
 }
 
 /**
@@ -791,16 +780,19 @@ function structuresAlign(baseline: SmartDetectConfig, actual: SmartDetectConfig)
 
 function smartDetectOwnedTypesRemain(baseline: SmartDetectConfig, actual: SmartDetectConfig): boolean {
   if (baseline.settingsPresent) {
-    for (const key of LIST_KEYS) {
-      if (intersection(baseline[key], actual[key]).length > 0) {
-        return true;
-      }
+    if (intersection(baseline.audioTypes, actual.audioTypes).length > 0) {
+      return true;
+    }
+    if (intersection(baseline.autoTrackingObjectTypes, actual.autoTrackingObjectTypes).length > 0) {
+      return true;
+    }
+    const secondLens = new Set(secondLensObjectTypes(actual));
+    const owned = baseline.objectTypes.filter((type) => !secondLens.has(type));
+    if (intersection(owned, actual.objectTypes).length > 0) {
+      return true;
     }
   }
-  return (
-    zoneOwnedTypesRemain(baseline.zones, actual.zones) ||
-    zoneOwnedTypesRemain(baseline.secondLensZones, actual.secondLensZones)
-  );
+  return zoneOwnedTypesRemain(baseline.zones, actual.zones);
 }
 
 function zoneOwnedTypesRemain(
@@ -821,13 +813,42 @@ function zoneOwnedTypesRemain(
 }
 
 function settingsObligationMet(enabled: boolean, baseline: SmartDetectConfig, actual: SmartDetectConfig): boolean {
+  const secondLens = secondLensObjectTypes(actual);
   if (!baseline.settingsPresent) {
-    if (!enabled && LIST_KEYS.some((key) => actual[key].length > 0)) {
+    if (!enabled && (actual.audioTypes.length > 0 || actual.autoTrackingObjectTypes.length > 0)) {
+      return false;
+    }
+    if (!enabled && actual.objectTypes.some((type) => !new Set(secondLens).has(type))) {
       return false;
     }
     return true;
   }
-  return LIST_KEYS.every((key) => listObligationMet(enabled, baseline[key], actual[key]));
+  if (!listObligationMet(enabled, baseline.audioTypes, actual.audioTypes)) {
+    return false;
+  }
+  if (!listObligationMet(enabled, baseline.autoTrackingObjectTypes, actual.autoTrackingObjectTypes)) {
+    return false;
+  }
+  return objectTypesObligationMet(enabled, baseline.objectTypes, actual.objectTypes, secondLens);
+}
+
+function objectTypesObligationMet(
+  enabled: boolean,
+  owned: string[],
+  actual: string[],
+  secondLensTypes: string[],
+): boolean {
+  const secondLens = new Set(secondLensTypes);
+  if (enabled) {
+    if (!typesPresent(owned, actual)) {
+      return false;
+    }
+    return owned.length === 0 || extraTypes(owned, actual).every((type) => secondLens.has(type));
+  }
+  return typesCleared(
+    owned.filter((type) => !secondLens.has(type)),
+    actual,
+  );
 }
 
 function zonesObligationMet(

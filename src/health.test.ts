@@ -250,9 +250,7 @@ describe('health report', () => {
     expect(cameraHealth?.smartDetectDrift).toBe(false);
     expect(cameraHealth?.drift).toBe(false);
     expect(cameraHealth?.readback.status).toBe('verified');
-    expect(cameraHealth?.smartDetectEnforcedTypes).toEqual([
-      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
-    ]);
+    expect(cameraHealth?.smartDetectEnforcedTypes).toEqual([]);
   });
 
   it('marks an old successful read stale without turning it into a fresh verification', () => {
