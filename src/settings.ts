@@ -2,7 +2,7 @@ import type { PlatformConfig } from 'homebridge';
 
 export const PLUGIN_NAME = 'homebridge-unifi-protect-motion-trigger';
 export const PLATFORM_NAME = 'UniFi Protect Motion Trigger';
-export const PLUGIN_VERSION = '1.0.14';
+export const PLUGIN_VERSION = '1.0.15';
 
 export const DEFAULT_MOTION_DURATION = 10; // seconds
 
