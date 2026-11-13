@@ -196,11 +196,11 @@ describe('ProtectMotionPlatform health', () => {
       zones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points: entrance,
           sensitivity: 70,
           objectTypes: ['person', 'vehicle'],
-          raw: { id: 1, name: 'Entrance', points: entrance, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+          raw: { id: 1, name: 'Zone A', points: entrance, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
         },
       ],
       secondLensZones: [
@@ -216,7 +216,7 @@ describe('ProtectMotionPlatform health', () => {
     });
     apiState.camera.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
     Object.assign(apiState.camera, {
-      smartDetectZones: [{ id: 1, name: 'Entrance', points: entrance, sensitivity: 70, objectTypes: [] }],
+      smartDetectZones: [{ id: 1, name: 'Zone A', points: entrance, sensitivity: 70, objectTypes: [] }],
       secondLensSmartDetectZones: [{ id: 2, name: 'Down', points: down, sensitivity: 40, objectTypes: ['package'] }],
     });
 

@@ -466,7 +466,7 @@ function dualLensConfig(mainTypes: string[], secondTypes: string[]): SmartDetect
     audioTypes: [],
     autoTrackingObjectTypes: [],
     settingsPresent: true,
-    zones: [zoneSnapshot(1, 'Entrance', 70, mainTypes, mainPoints)],
+    zones: [zoneSnapshot(1, 'Zone A', 70, mainTypes, mainPoints)],
     secondLensZones: [zoneSnapshot(2, 'Down', 40, secondTypes, secondPoints)],
   };
 }

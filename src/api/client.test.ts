@@ -455,7 +455,7 @@ function doorbellRecord(secondLensTypes: string[]): CameraStore {
     smartDetectZones: [
       {
         id: 1,
-        name: 'Entrance',
+        name: 'Zone A',
         color: '#123456',
         points: [
           [0, 0],

@@ -162,7 +162,7 @@ describe('health report', () => {
       zones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points: [
             [0, 0],
             [1, 0],
@@ -170,7 +170,7 @@ describe('health report', () => {
           ],
           sensitivity: 70,
           objectTypes: ['person', 'vehicle'],
-          raw: { id: 1, name: 'Entrance', sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+          raw: { id: 1, name: 'Zone A', sensitivity: 70, objectTypes: ['person', 'vehicle'] },
         },
       ],
       secondLensZones: [
@@ -197,7 +197,7 @@ describe('health report', () => {
       smartDetectZones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points: [
             [0, 0],
             [1, 0],
