@@ -348,6 +348,47 @@ describe('motion state', () => {
     expect(classifyClearReadback(settingsOn, settingsCleared).enforced).toEqual([]);
   });
 
+  it('treats a second-lens type as enforced when the camera-level list also cleared it', () => {
+    const audioTypes = ['smoke', 'siren', 'bark', 'speak'];
+    const before = dualLensConfig([], ['package']);
+    before.objectTypes = ['person', 'vehicle', 'package'];
+    before.audioTypes = [...audioTypes];
+    const after = dualLensConfig([], ['package']);
+
+    const classified = classifyClearReadback(before, after);
+
+    expect(classified.ignored).toBe(false);
+    expect(classified.enforced).toEqual([
+      expect.objectContaining({ list: 'secondLensZone', zoneId: 2, types: ['package'] }),
+    ]);
+    const kept = withoutEnforcedTypes(before, classified.enforced);
+    expect(kept.objectTypes).toEqual(['person', 'vehicle', 'package']);
+    expect(kept.audioTypes).toEqual(audioTypes);
+    expect(kept.zones?.[0]?.objectTypes).toEqual([]);
+    expect(kept.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(smartDetectObligationMet(false, kept, after)).toBe(true);
+    expect(smartDetectDrift(false, after, kept)).toBe(false);
+    expect(smartDetectEffectivelyEnabled(after, kept)).toBe(false);
+    expect(listSmartDetectEnforcedTypes(kept, after)).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
+    ]);
+
+    const restored = dualLensConfig([], ['package']);
+    restored.objectTypes = ['person', 'vehicle', 'package'];
+    restored.audioTypes = [...audioTypes];
+    expect(smartDetectObligationMet(true, kept, restored)).toBe(true);
+    expect(smartDetectDrift(true, restored, kept)).toBe(false);
+    expect(smartDetectEffectivelyEnabled(restored, kept)).toBe(true);
+    const plan = planSmartDetectWrite(false, cameraFromConfig('Doorbell', after), before);
+    expect(plan.config?.objectTypes).toEqual(['person', 'vehicle', 'package']);
+    expect(plan.config?.audioTypes).toEqual(audioTypes);
+    expect(plan.config?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+    const restore = planSmartDetectWrite(true, cameraFromConfig('Doorbell', after), kept);
+    expect(restore.patch.smartDetectSettings?.objectTypes).toEqual(['person', 'vehicle', 'package']);
+    expect(restore.patch.smartDetectSettings?.audioTypes).toEqual(audioTypes);
+    expect(restore.patch.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual([]);
+  });
+
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {
     const saved = planSmartDetectWrite(
       false,
