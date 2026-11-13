@@ -445,7 +445,7 @@ describe('ProtectClient device writes', () => {
 function doorbellRecord(secondLensTypes: string[]): CameraStore {
   return cameraRecord({
     id: 'doorbell',
-    name: 'Entrance Doorbell',
+    name: 'Doorbell',
     type: 'UVC G4 Doorbell Pro PoE',
     smartDetectSettings: {
       objectTypes: [],
@@ -866,7 +866,7 @@ describe('smart detection snapshots', () => {
       return structuredClone(store);
     });
 
-    const doorbell = { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera;
+    const doorbell = { id: 'doorbell', name: 'Doorbell' } as ProtectCamera;
     const outcome = await client.updateCameraSmartDetection(doorbell, false);
 
     expect(outcome.smartDetectResult).toBe('ok');
@@ -905,7 +905,7 @@ describe('smart detection snapshots', () => {
           cameras: [
             {
               id: 'doorbell',
-              name: 'Entrance Doorbell',
+              name: 'Doorbell',
               intendedMotionEnabled: true,
               intendedSmartDetect: false,
               smartDetectPreferencesSaved: true,
@@ -942,7 +942,7 @@ describe('smart detection snapshots', () => {
     const dir = mkdtempSync(join(tmpdir(), 'protect-doorbell-on-'));
     const snapshotStore = new SmartDetectSnapshotStore(() => dir);
     const saved = doorbellRecord([]);
-    snapshotStore.remember('10.0.0.5', 'doorbell', 'Entrance Doorbell', readConfig(saved));
+    snapshotStore.remember('10.0.0.5', 'doorbell', 'Doorbell', readConfig(saved));
     store = doorbellRecord(['package']);
     store.smartDetectZones = (store.smartDetectZones ?? []).map((zone) => ({ ...zone, objectTypes: [] }));
     const log = createMockLogger();
@@ -958,10 +958,7 @@ describe('smart detection snapshots', () => {
       return structuredClone(store);
     });
 
-    const kept = await client.updateCameraSmartDetection(
-      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
-      true,
-    );
+    const kept = await client.updateCameraSmartDetection({ id: 'doorbell', name: 'Doorbell' } as ProtectCamera, true);
 
     expect(kept.smartDetectResult).toBe('ok');
     expect(apiState.updateDevice).toHaveBeenCalledTimes(1);
@@ -993,7 +990,7 @@ describe('smart detection snapshots', () => {
           cameras: [
             {
               id: 'doorbell',
-              name: 'Entrance Doorbell',
+              name: 'Doorbell',
               intendedMotionEnabled: true,
               intendedSmartDetect: true,
               smartDetectPreferencesSaved: true,
@@ -1015,7 +1012,7 @@ describe('smart detection snapshots', () => {
       return structuredClone(store);
     });
     const dropped = await client.updateCameraSmartDetection(
-      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
+      { id: 'doorbell', name: 'Doorbell' } as ProtectCamera,
       true,
     );
     expect(dropped.smartDetectResult).toBe('ok');
@@ -1034,7 +1031,7 @@ describe('smart detection snapshots', () => {
           cameras: [
             {
               id: 'doorbell',
-              name: 'Entrance Doorbell',
+              name: 'Doorbell',
               intendedMotionEnabled: true,
               intendedSmartDetect: true,
               smartDetectPreferencesSaved: true,
@@ -1059,7 +1056,7 @@ describe('smart detection snapshots', () => {
     const client = connectedClient();
 
     const outcome = await client.updateCameraSmartDetection(
-      { id: 'doorbell', name: 'Entrance Doorbell' } as ProtectCamera,
+      { id: 'doorbell', name: 'Doorbell' } as ProtectCamera,
       false,
     );
 

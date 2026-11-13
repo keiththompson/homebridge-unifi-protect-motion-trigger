@@ -190,7 +190,7 @@ describe('health report', () => {
     };
     const live = {
       id: 'cam1',
-      name: 'Entrance Doorbell',
+      name: 'Doorbell',
       recordingSettings: { enableMotionDetection: true },
       motionSettings: null,
       smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
@@ -234,7 +234,7 @@ describe('health report', () => {
           cameras: [
             {
               id: 'cam1',
-              name: 'Entrance Doorbell',
+              name: 'Doorbell',
               intendedMotionEnabled: true,
               smartDetectPreferencesSaved: true,
               intendedSmartDetect: false,

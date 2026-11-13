@@ -302,7 +302,7 @@ describe('CameraAccessory motion lifecycle', () => {
   });
 
   it('stays off when a later event only carries types the saved snapshot did not have', () => {
-    const accessory = createMockAccessory('Entrance Doorbell', 'uuid-door');
+    const accessory = createMockAccessory('Doorbell', 'uuid-door');
     const points = [
       [0, 0],
       [1, 0],
@@ -314,7 +314,7 @@ describe('CameraAccessory motion lifecycle', () => {
       [0.9, 1],
     ];
     const live = camera(true);
-    live.name = 'Entrance Doorbell';
+    live.name = 'Doorbell';
     live.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
     live.smartDetectZones = [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: [] }];
     live.secondLensSmartDetectZones = [

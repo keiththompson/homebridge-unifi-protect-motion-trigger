@@ -272,13 +272,13 @@ describe('motion state', () => {
     expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], ['package']), saved)).toBe(false);
     expect(smartDetectDrift(true, dualLensConfig(['person', 'vehicle'], []), saved)).toBe(false);
 
-    const again = planSmartDetectWrite(false, cameraFromConfig('Entrance Doorbell', cleared), saved);
+    const again = planSmartDetectWrite(false, cameraFromConfig('Doorbell', cleared), saved);
     expect(again.patch.secondLensSmartDetectZones).toBeUndefined();
     expect(again.patch.smartDetectSettings?.objectTypes).toEqual(['package']);
     expect(again.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
     expect(again.config?.secondLensZones?.[0]?.objectTypes).toEqual([]);
 
-    const restored = planSmartDetectWrite(true, cameraFromConfig('Entrance Doorbell', cleared), saved);
+    const restored = planSmartDetectWrite(true, cameraFromConfig('Doorbell', cleared), saved);
     expect(restored.patch.smartDetectZones?.[0]).toMatchObject({ objectTypes: ['person', 'vehicle'] });
     expect(restored.patch.secondLensSmartDetectZones).toBeUndefined();
   });
