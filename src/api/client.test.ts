@@ -483,6 +483,41 @@ function doorbellRecord(secondLensTypes: string[]): CameraStore {
   });
 }
 
+const AGGREGATE_AUDIO_TYPES = ['smoke', 'siren', 'bark', 'speak'];
+const AGGREGATE_OBJECT_TYPES = ['person', 'vehicle', 'package'];
+
+function aggregateDoorbell(objectTypes: string[], secondTypes: string[]): CameraStore {
+  const zone = (id: number, types: string[]): Record<string, unknown> => ({
+    id,
+    name: 'Default',
+    points: [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ],
+    sensitivity: 50,
+    objectTypes: [...types],
+  });
+  return cameraRecord({
+    id: 'doorbell',
+    name: 'Doorbell',
+    smartDetectSettings: {
+      objectTypes: [...objectTypes],
+      audioTypes: objectTypes.length > 0 ? [...AGGREGATE_AUDIO_TYPES] : [],
+      autoTrackingObjectTypes: [],
+    },
+    smartDetectZones: [zone(1, [])],
+    secondLensSmartDetectZones: [zone(2, secondTypes)],
+  });
+}
+
+function keepForcedPackage(target: CameraStore): void {
+  const lens = target.secondLensSmartDetectZones?.[0];
+  if (lens && Array.isArray(lens.objectTypes) && lens.objectTypes.length === 0) {
+    target.secondLensSmartDetectZones = [{ ...lens, objectTypes: ['package'] }];
+  }
+}
+
 function refillEmptySecondLens(target: CameraStore): void {
   const zones = target.secondLensSmartDetectZones;
   const zone = zones?.[0];
@@ -1166,6 +1201,168 @@ describe('controller-enforced detection types', () => {
     expect(saved.cameras[0]?.config.zones[0]?.objectTypes).toEqual(['person', 'vehicle']);
     expect(saved.cameras[0]?.config.secondLensZones[0]?.objectTypes).toEqual([]);
     expect(JSON.stringify(saved)).not.toContain('package');
+  });
+});
+
+describe('camera-level list and a forced second lens', () => {
+  const address = '10.0.0.5';
+  const doorbell = { id: 'doorbell', name: 'Doorbell' } as ProtectCamera;
+
+  function readSaved(dir: string): {
+    objectTypes: string[];
+    audioTypes: string[];
+    zones: Array<{ objectTypes: string[] }>;
+    secondLensZones: Array<{ objectTypes: string[]; raw: { objectTypes: string[] } }>;
+  } {
+    const parsed = JSON.parse(readFileSync(join(dir, SMART_DETECT_SNAPSHOT_FILENAME), 'utf8')) as {
+      cameras: Array<{ config: ReturnType<typeof readSaved> }>;
+    };
+    const config = parsed.cameras[0]?.config;
+    if (!config) {
+      throw new Error('missing snapshot');
+    }
+    return config;
+  }
+
+  function health(
+    intendedSmartDetect: boolean,
+    smartDetectSnapshot: ReturnType<SmartDetectSnapshotStore['get']>,
+    snapshot: ReturnType<ProtectClient['getCameraSnapshot']>,
+  ): ReturnType<typeof buildHealthReport>['controllers'][number]['cameras'][number] | undefined {
+    return buildHealthReport({
+      pluginVersion: '1.0.15',
+      generatedAt: 1_700_000_000_000,
+      controllers: [
+        {
+          address,
+          connected: true,
+          throttled: false,
+          admin: true,
+          lastError: null,
+          cameras: [
+            {
+              id: 'doorbell',
+              name: 'Doorbell',
+              intendedMotionEnabled: true,
+              intendedSmartDetect,
+              smartDetectPreferencesSaved: true,
+              smartDetectSnapshot,
+              snapshot,
+            },
+          ],
+        },
+      ],
+    }).controllers[0]?.cameras[0];
+  }
+
+  function clientFor(dir: string): {
+    client: ProtectClient;
+    snapshots: SmartDetectSnapshotStore;
+    log: ReturnType<typeof createMockLogger>;
+  } {
+    const log = createMockLogger();
+    const snapshots = new SmartDetectSnapshotStore(() => dir);
+    const client = new ProtectClient(log, {
+      sleep: async () => undefined,
+      smartDetectStore: snapshots,
+      controllerAddress: address,
+    });
+    (client as unknown as { connected: boolean }).connected = true;
+    apiState.updateDevice = vi.fn(async (_camera: unknown, payload: Record<string, unknown>) => {
+      applyPatch(store, payload);
+      keepForcedPackage(store);
+      return structuredClone(store);
+    });
+    return { client, snapshots, log };
+  }
+
+  it('turns detection off and restores the kept snapshot, ignoring the forced second-lens type', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-aggregate-'));
+    store = aggregateDoorbell(AGGREGATE_OBJECT_TYPES, ['package']);
+    const { client, snapshots, log } = clientFor(dir);
+
+    const off = await client.updateCameraSmartDetection(doorbell, false);
+
+    expect(off.smartDetectResult).toBe('ok');
+    expect(store.smartDetectSettings.objectTypes).toEqual([]);
+    expect(store.smartDetectSettings.audioTypes).toEqual([]);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    const kept = readSaved(dir);
+    expect(kept.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(kept.audioTypes).toEqual(AGGREGATE_AUDIO_TYPES);
+    expect(kept.zones[0]?.objectTypes).toEqual([]);
+    expect(kept.secondLensZones[0]?.objectTypes).toEqual([]);
+    expect(kept.secondLensZones[0]?.raw.objectTypes).toEqual([]);
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('second lens Default: package'));
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('left out of the saved snapshot'));
+    const offHealth = health(false, snapshots.get(address, 'doorbell'), client.getCameraSnapshot('doorbell'));
+    expect(offHealth?.drift).toBe(false);
+    expect(offHealth?.smartDetectDrift).toBe(false);
+    expect(offHealth?.readback.status).toBe('verified');
+    expect(offHealth?.smartDetectEnforcedTypes).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Default', types: ['package'] },
+    ]);
+    expect(offHealth?.smartDetectExpected?.objectTypes).toEqual([]);
+    expect(offHealth?.smartDetectActual?.objectTypes).toEqual([]);
+    expect(offHealth?.smartDetectActual?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+
+    apiState.updateDevice.mockClear();
+    const again = await client.updateCameraSmartDetection(doorbell, false);
+    expect(again.smartDetectResult).toBe('ok');
+    expect(apiState.updateDevice).not.toHaveBeenCalled();
+    expect(readSaved(dir).objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(readSaved(dir).secondLensZones[0]?.objectTypes).toEqual([]);
+
+    const on = await client.updateCameraSmartDetection(doorbell, true);
+
+    expect(on.smartDetectResult).toBe('ok');
+    expect(store.smartDetectSettings.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(store.smartDetectSettings.audioTypes).toEqual(AGGREGATE_AUDIO_TYPES);
+    expect(store.smartDetectZones?.[0]?.objectTypes).toEqual([]);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    const restored = readSaved(dir);
+    expect(restored.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(restored.audioTypes).toEqual(AGGREGATE_AUDIO_TYPES);
+    expect(restored.secondLensZones[0]?.objectTypes).toEqual([]);
+    const onHealth = health(true, snapshots.get(address, 'doorbell'), client.getCameraSnapshot('doorbell'));
+    expect(onHealth?.drift).toBe(false);
+    expect(onHealth?.smartDetectDrift).toBe(false);
+    expect(onHealth?.readback.status).toBe('verified');
+    expect(onHealth?.smartDetectEnforcedTypes).toEqual([
+      { list: 'secondLensZone', zoneId: 2, zoneName: 'Default', types: ['package'] },
+    ]);
+  });
+
+  it('restores a kept snapshot when the camera-level lists were already cleared', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'protect-aggregate-on-'));
+    const { client, snapshots } = clientFor(dir);
+    snapshots.remember(
+      address,
+      'doorbell',
+      'Doorbell',
+      readSmartDetectConfig(aggregateDoorbell(AGGREGATE_OBJECT_TYPES, ['package']) as unknown as ProtectCamera),
+    );
+    store = aggregateDoorbell([], ['package']);
+
+    const on = await client.updateCameraSmartDetection(doorbell, true);
+
+    expect(on.smartDetectResult).toBe('ok');
+    expect(store.smartDetectSettings.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(store.smartDetectSettings.audioTypes).toEqual(AGGREGATE_AUDIO_TYPES);
+    expect(store.secondLensSmartDetectZones?.[0]?.objectTypes).toEqual(['package']);
+    const saved = readSaved(dir);
+    expect(saved.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(saved.audioTypes).toEqual(AGGREGATE_AUDIO_TYPES);
+    expect(saved.secondLensZones[0]?.objectTypes).toEqual(['package']);
+    const report = health(true, snapshots.get(address, 'doorbell'), client.getCameraSnapshot('doorbell'));
+    expect(report?.drift).toBe(false);
+    expect(report?.smartDetectDrift).toBe(false);
+    expect(report?.readback.status).toBe('verified');
+    expect(report?.smartDetectExpected?.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
+    expect(report?.smartDetectActual?.objectTypes).toEqual(AGGREGATE_OBJECT_TYPES);
   });
 });
 

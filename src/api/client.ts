@@ -524,6 +524,7 @@ export class ProtectClient {
         } else if (wantsSmart && !smartMatch) {
           smartResult = 'mismatch';
         }
+        let removedEnforced = false;
         if (settings.smartDetect === false && liveCamera && readback.camera && config) {
           const classified = classifyClearReadback(
             readSmartDetectConfig(liveCamera),
@@ -538,6 +539,7 @@ export class ProtectClient {
             const stripped = withoutEnforcedTypes(config, classified.enforced);
             if (!smartDetectConfigsEqual(config, stripped)) {
               config = stripped;
+              removedEnforced = true;
               this.persistSmartDetectSnapshot(camera, stripped);
             }
           }
@@ -558,7 +560,7 @@ export class ProtectClient {
               this.persistSmartDetectSnapshot(camera, cleaned);
             }
           }
-          this.log.info(this.confirmedReadbackMessage(camera, changes, config, readback.camera));
+          this.log.info(this.confirmedReadbackMessage(camera, changes, config, readback.camera, removedEnforced));
         }
         const result = controlsRequested ? controlResult : (smartResult ?? 'failed');
         return done(result, smartResult, readback.camera);
@@ -1015,6 +1017,7 @@ export class ProtectClient {
     changes: string[],
     baseline: SmartDetectConfig | null,
     actual: ProtectCamera | null,
+    removedEnforced = false,
   ): string {
     const confirmed = `${changes.join(', ')} for ${camera.name} (confirmed by camera readback)`;
     if (!baseline || !actual) {
@@ -1024,9 +1027,12 @@ export class ProtectClient {
     if (enforced.length === 0) {
       return confirmed;
     }
+    const kept = removedEnforced
+      ? 'Those types were left out of the saved snapshot.'
+      : 'The saved snapshot was not changed.';
     return (
       `${confirmed}. Protect kept smart-detection types this plugin did not save ` +
-      `(${formatEnforcedTypes(enforced)}). The saved snapshot was not changed.`
+      `(${formatEnforcedTypes(enforced)}). ${kept}`
     );
   }
 

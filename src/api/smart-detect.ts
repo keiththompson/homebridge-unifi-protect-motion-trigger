@@ -15,8 +15,9 @@ const LIST_KEYS = ['objectTypes', 'audioTypes', 'autoTrackingObjectTypes'] as co
  * every saved type is back. The extra types are reported, not stored.
  *
  * A type that stays on an unchanged list, and that this clear did not drop
- * from any other list, is controller-enforced and is removed from the snapshot.
- * A clear that changes no list records nothing.
+ * from another zone, is controller-enforced and is removed from the snapshot.
+ * Clearing the camera-level object list does not stop a second-lens copy of
+ * that type from being enforced. A clear that changes no list records nothing.
  */
 
 export interface SmartDetectZoneSnapshot {
@@ -277,8 +278,9 @@ export interface ClearReadback {
 
 /**
  * One readback after a clear. A type left on a list that did not change is
- * controller-enforced when this clear did not remove that type from any list.
- * Nothing is recorded when the camera is unchanged.
+ * controller-enforced when this clear did not remove that type from a zone.
+ * A camera-level clear is not that signal for a second lens. Nothing is
+ * recorded when the camera is unchanged.
  */
 export function classifyClearReadback(before: SmartDetectConfig, after: SmartDetectConfig): ClearReadback {
   const settings = compareSettings(before, after);
@@ -288,7 +290,7 @@ export function classifyClearReadback(before: SmartDetectConfig, after: SmartDet
   if (!parts.some((part) => part.changed)) {
     return { ignored: true, enforced: [] };
   }
-  return { ignored: false, enforced: enforcedTypes(parts) };
+  return { ignored: false, enforced: enforcedTypes(settings, zones, secondLens) };
 }
 
 /** Removes controller-enforced types so they are not saved as the user's types. */
@@ -536,14 +538,22 @@ function compareZones(
 }
 
 /**
- * A type that disappeared from a list in this clear is a user type. It is not
- * enforced when a different list still has it.
+ * A type removed from a zone in this clear is a user type. It is not enforced
+ * when a different list still has it. Removing it from the camera-level object
+ * list is not that signal for a second lens: the controller can put the type
+ * back on that lens after the aggregate list has dropped it.
  */
-function enforcedTypes(parts: ListComparison[]): SmartDetectEnforcedType[] {
-  const cleared = new Set(parts.flatMap((part) => part.cleared));
+function enforcedTypes(
+  settings: ListComparison,
+  zones: ListComparison,
+  secondLens: ListComparison,
+): SmartDetectEnforcedType[] {
+  const clearedAnywhere = new Set([settings, zones, secondLens].flatMap((part) => part.cleared));
+  const clearedOnAZone = new Set([...zones.cleared, ...secondLens.cleared]);
   const enforced: SmartDetectEnforcedType[] = [];
-  for (const part of parts) {
+  for (const part of [settings, zones, secondLens]) {
     for (const entry of part.stuck) {
+      const cleared = entry.list === 'secondLensZone' ? clearedOnAZone : clearedAnywhere;
       const types = entry.types.filter((type) => !cleared.has(type));
       if (types.length > 0) {
         enforced.push({ ...entry, types });
