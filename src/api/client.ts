@@ -17,6 +17,7 @@ import {
   readMotionDiagnostics,
 } from './motion-state.js';
 import {
+  classifyClearReadback,
   listSmartDetectEnforcedTypes,
   minimalSmartDetectPatch,
   planSmartDetectWrite,
@@ -24,9 +25,11 @@ import {
   readSmartDetectConfig,
   type SmartDetectConfig,
   smartDetectConfigActive,
+  smartDetectConfigsEqual,
   type SmartDetectEnforcedType,
   type SmartDetectPatch,
   type SmartDetectWritePlan,
+  withoutEnforcedTypes,
   withoutUnsavedSmartDetectTypes,
 } from './smart-detect.js';
 import type {
@@ -426,7 +429,7 @@ export class ProtectClient {
       }
     }
 
-    const config = smartPlan?.config ?? keptConfig;
+    let config = smartPlan?.config ?? keptConfig;
     const controlsRequested = wantsLed || wantsMotion;
     if (smartSkipped && !controlsRequested) {
       return finish('failed', 'failed', config);
@@ -437,6 +440,7 @@ export class ProtectClient {
       smartDetectConfig: smartSkipped ? null : (smartPlan?.expectedConfig ?? null),
       smartDetectBaseline: smartSkipped ? null : (smartPlan?.config ?? null),
       smartDetectEnabling: settings.smartDetect === true,
+      smartDetectBefore: settings.smartDetect === false && liveCamera ? readSmartDetectConfig(liveCamera) : null,
     };
     if (wantsLed) {
       expected.led = settings.led;
@@ -511,6 +515,7 @@ export class ProtectClient {
             smartDetectConfig: expected.smartDetectConfig ?? null,
             smartDetectBaseline: expected.smartDetectBaseline ?? null,
             smartDetectEnabling: expected.smartDetectEnabling,
+            smartDetectBefore: expected.smartDetectBefore,
           });
         const controlResult: UpdateResult = controlsMatch ? 'ok' : 'mismatch';
         let smartResult: UpdateResult | null = wantsSmart ? 'ok' : null;
@@ -518,6 +523,24 @@ export class ProtectClient {
           smartResult = 'failed';
         } else if (wantsSmart && !smartMatch) {
           smartResult = 'mismatch';
+        }
+        if (settings.smartDetect === false && liveCamera && readback.camera && config) {
+          const classified = classifyClearReadback(
+            readSmartDetectConfig(liveCamera),
+            readSmartDetectConfig(readback.camera),
+          );
+          if (classified.ignored) {
+            if (smartResult !== 'ok' && keptConfig) {
+              config = keptConfig;
+              this.persistSmartDetectSnapshot(camera, keptConfig);
+            }
+          } else if (smartResult === 'ok' && classified.enforced.length > 0) {
+            const stripped = withoutEnforcedTypes(config, classified.enforced);
+            if (!smartDetectConfigsEqual(config, stripped)) {
+              config = stripped;
+              this.persistSmartDetectSnapshot(camera, stripped);
+            }
+          }
         }
         if (controlsRequested && !controlsMatch) {
           this.logReadbackMismatch(camera, expected, readback.camera);

@@ -8,11 +8,14 @@ import {
   smartDetectDrift,
 } from './motion-state.js';
 import {
+  classifyClearReadback,
   listSmartDetectEnforcedTypes,
   planSmartDetectWrite,
   type SmartDetectConfig,
+  smartDetectEffectivelyEnabled,
   smartDetectObligationMet,
   type SmartDetectZoneSnapshot,
+  withoutEnforcedTypes,
 } from './smart-detect.js';
 import type { ProtectCamera } from './types.js';
 
@@ -296,6 +299,53 @@ describe('motion state', () => {
     expect(smartDetectDrift(true, added, saved)).toBe(true);
     expect(smartDetectObligationMet(false, saved, stillOn)).toBe(false);
     expect(smartDetectObligationMet(true, saved, added)).toBe(false);
+  });
+
+  it('keeps a saved snapshot when the live camera is only half off', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], ['package']);
+    const halfOff = dualLensConfig([], ['package']);
+
+    const plan = planSmartDetectWrite(false, cameraFromConfig('Test Camera', halfOff), saved);
+
+    expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(plan.config?.secondLensZones?.[0]?.objectTypes).toEqual(['package']);
+    expect(smartDetectEffectivelyEnabled(halfOff, saved)).toBe(false);
+    expect(smartDetectEffectivelyEnabled(dualLensConfig(['person'], ['package']), saved)).toBe(true);
+    expect(smartDetectEffectivelyEnabled(saved, saved)).toBe(true);
+  });
+
+  it('adopts a detection type removed while detection is still on', () => {
+    const saved = dualLensConfig(['person', 'vehicle'], []);
+    saved.objectTypes = ['person', 'vehicle'];
+    const edited = dualLensConfig(['person'], []);
+    edited.objectTypes = ['person'];
+
+    expect(smartDetectEffectivelyEnabled(edited, saved)).toBe(true);
+    const plan = planSmartDetectWrite(false, cameraFromConfig('Test Camera', edited), saved);
+    expect(plan.config?.objectTypes).toEqual(['person']);
+    expect(plan.config?.zones?.[0]?.objectTypes).toEqual(['person']);
+  });
+
+  it('treats an unchanged refilled list as enforced and an unchanged camera as ignored', () => {
+    const before = dualLensConfig(['person', 'vehicle'], ['package']);
+    const refilled = dualLensConfig([], ['package']);
+
+    const classified = classifyClearReadback(before, refilled);
+
+    expect(classified.ignored).toBe(false);
+    expect(classified.enforced).toEqual([
+      expect.objectContaining({ list: 'secondLensZone', zoneId: 2, types: ['package'] }),
+    ]);
+    const stripped = withoutEnforcedTypes(before, classified.enforced);
+    expect(stripped.zones?.[0]?.objectTypes).toEqual(['person', 'vehicle']);
+    expect(stripped.secondLensZones?.[0]?.objectTypes).toEqual([]);
+    expect(stripped.secondLensZones?.[0]?.raw.objectTypes).toEqual([]);
+    expect(classifyClearReadback(before, before)).toEqual({ ignored: true, enforced: [] });
+    expect(classifyClearReadback(before, dualLensConfig(['person'], [])).enforced).toEqual([]);
+    const settingsOn = dualLensConfig(['person', 'vehicle'], []);
+    settingsOn.objectTypes = ['person', 'vehicle'];
+    const settingsCleared = dualLensConfig(['person', 'vehicle'], []);
+    expect(classifyClearReadback(settingsOn, settingsCleared).enforced).toEqual([]);
   });
 
   it('does not replace a saved zone snapshot when the live camera is already disabled', () => {
