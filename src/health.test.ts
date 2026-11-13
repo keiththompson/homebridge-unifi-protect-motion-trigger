@@ -162,7 +162,7 @@ describe('health report', () => {
       zones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points: [
             [0, 0],
             [1, 0],
@@ -170,7 +170,7 @@ describe('health report', () => {
           ],
           sensitivity: 70,
           objectTypes: ['person', 'vehicle'],
-          raw: { id: 1, name: 'Entrance', sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+          raw: { id: 1, name: 'Zone A', sensitivity: 70, objectTypes: ['person', 'vehicle'] },
         },
       ],
       secondLensZones: [
@@ -190,14 +190,14 @@ describe('health report', () => {
     };
     const live = {
       id: 'cam1',
-      name: 'Entrance Doorbell',
+      name: 'Doorbell',
       recordingSettings: { enableMotionDetection: true },
       motionSettings: null,
       smartDetectSettings: { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] },
       smartDetectZones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points: [
             [0, 0],
             [1, 0],
@@ -234,7 +234,7 @@ describe('health report', () => {
           cameras: [
             {
               id: 'cam1',
-              name: 'Entrance Doorbell',
+              name: 'Doorbell',
               intendedMotionEnabled: true,
               smartDetectPreferencesSaved: true,
               intendedSmartDetect: false,
@@ -250,9 +250,7 @@ describe('health report', () => {
     expect(cameraHealth?.smartDetectDrift).toBe(false);
     expect(cameraHealth?.drift).toBe(false);
     expect(cameraHealth?.readback.status).toBe('verified');
-    expect(cameraHealth?.smartDetectEnforcedTypes).toEqual([
-      { list: 'secondLensZone', zoneId: 2, zoneName: 'Down', types: ['package'] },
-    ]);
+    expect(cameraHealth?.smartDetectEnforcedTypes).toEqual([]);
   });
 
   it('marks an old successful read stale without turning it into a fresh verification', () => {

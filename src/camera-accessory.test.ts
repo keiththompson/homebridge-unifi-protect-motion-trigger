@@ -302,7 +302,7 @@ describe('CameraAccessory motion lifecycle', () => {
   });
 
   it('stays off when a later event only carries types the saved snapshot did not have', () => {
-    const accessory = createMockAccessory('Entrance Doorbell', 'uuid-door');
+    const accessory = createMockAccessory('Doorbell', 'uuid-door');
     const points = [
       [0, 0],
       [1, 0],
@@ -314,9 +314,9 @@ describe('CameraAccessory motion lifecycle', () => {
       [0.9, 1],
     ];
     const live = camera(true);
-    live.name = 'Entrance Doorbell';
+    live.name = 'Doorbell';
     live.smartDetectSettings = { objectTypes: [], audioTypes: [], autoTrackingObjectTypes: [] };
-    live.smartDetectZones = [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: [] }];
+    live.smartDetectZones = [{ id: 1, name: 'Zone A', points, sensitivity: 70, objectTypes: [] }];
     live.secondLensSmartDetectZones = [
       { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
     ];
@@ -329,11 +329,11 @@ describe('CameraAccessory motion lifecycle', () => {
       zones: [
         {
           id: 1,
-          name: 'Entrance',
+          name: 'Zone A',
           points,
           sensitivity: 70,
           objectTypes: ['person', 'vehicle'],
-          raw: { id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
+          raw: { id: 1, name: 'Zone A', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] },
         },
       ],
       secondLensZones: [
@@ -360,7 +360,7 @@ describe('CameraAccessory motion lifecycle', () => {
     expect(cameraAccessory.smartDetectState).toBe(false);
 
     cameraAccessory.handleSmartDetectUpdate({
-      smartDetectZones: [{ id: 1, name: 'Entrance', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] }],
+      smartDetectZones: [{ id: 1, name: 'Zone A', points, sensitivity: 70, objectTypes: ['person', 'vehicle'] }],
       secondLensSmartDetectZones: [
         { id: 2, name: 'Down', points: downPoints, sensitivity: 40, objectTypes: ['package'] },
       ],
